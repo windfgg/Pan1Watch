@@ -251,7 +251,7 @@ function App() {
       </div>
 
       {/* Mobile Top Bar */}
-      <div className="sticky top-0 z-50 px-4 pt-3 pb-2 md:hidden">
+      <div className="sticky top-0 z-50 px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 md:hidden">
         <header className="card px-4">
           <div className="h-12 flex items-center justify-between">
             <NavLink to="/" className="flex items-center gap-2 group">
