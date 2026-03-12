@@ -93,6 +93,7 @@ class TestMcpPositions(unittest.TestCase):
         self.assertIn("market.indices", names)
         self.assertIn("stocks.list", names)
         self.assertIn("stocks.quotes", names)
+        self.assertIn("stocks.resolve", names)
         self.assertIn("mcp.health", names)
         self.assertIn("mcp.auth.status", names)
         self.assertIn("mcp.version", names)
@@ -115,6 +116,21 @@ class TestMcpPositions(unittest.TestCase):
         data = resp.json()["result"]["structuredContent"]
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["items"][0]["symbol"], "600519")
+
+    def test_stock_resolve_via_mcp(self):
+        resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.resolve",
+                "arguments": {"symbol": "600519"},
+            },
+            req_id=13,
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["result"]["structuredContent"]
+        self.assertTrue(data["resolved"])
+        self.assertEqual(data["stock_id"], 1)
+        self.assertEqual(data["symbol"], "600519")
 
     def test_auth_status_via_bearer(self):
         token, _ = create_token(expires_days=1)

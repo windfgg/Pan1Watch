@@ -15,7 +15,7 @@ import json
 import secrets
 import base64
 import binascii
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
 import jwt
@@ -93,7 +93,7 @@ WRITE_TOOL_NAMES = {
     "agents.trigger",
 }
 
-MCP_SERVER_VERSION = "0.3.0"
+MCP_SERVER_VERSION = "0.3.1"
 
 ERR_INVALID_PARAMS = "MCP_INVALID_PARAMS"
 ERR_AUTH_FAILED = "MCP_AUTH_FAILED"
@@ -711,7 +711,8 @@ def _create_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         )
 
     max_order = db.query(func.max(Stock.sort_order)).scalar() or 0
-    stock = Stock(symbol=symbol, name=name, market=market, sort_order=int(max_order) + 1)
+    stock = Stock(symbol=symbol, name=name, market=market,
+                  sort_order=int(max_order) + 1)
     db.add(stock)
     db.commit()
     db.refresh(stock)
@@ -748,7 +749,8 @@ def _delete_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
             hint="请检查 stock_id 是否正确",
         )
 
-    has_position = db.query(Position.id).filter(Position.stock_id == stock_id).first()
+    has_position = db.query(Position.id).filter(
+        Position.stock_id == stock_id).first()
     if has_position:
         raise McpToolError(
             error_code=ERR_CONFLICT,
@@ -794,12 +796,57 @@ def _search_stocks(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     }
 
 
+def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
+    _require_args(arguments, ["symbol"])
+    symbol = str(arguments["symbol"]).strip().upper()
+    market_raw = arguments.get("market")
+    market = str(market_raw).strip().upper() if market_raw is not None else ""
+
+    query = db.query(Stock).filter(Stock.symbol == symbol)
+    if market:
+        if market not in ("CN", "HK", "US", "FUND"):
+            raise McpToolError(
+                error_code=ERR_INVALID_PARAMS,
+                message=f"不支持的市场: {market}",
+                hint="市场类型仅支持 CN/HK/US/FUND",
+            )
+        query = query.filter(Stock.market == market)
+
+    rows = query.order_by(Stock.id.asc()).all()
+    if not rows:
+        raise McpToolError(
+            error_code=ERR_NOT_FOUND,
+            message="未找到对应股票",
+            hint="请先调用 stocks.create 添加到自选股，或检查 symbol/market 是否正确。",
+            details={"symbol": symbol, "market": market or None},
+        )
+
+    if len(rows) > 1 and not market:
+        return {
+            "resolved": False,
+            "symbol": symbol,
+            "message": "存在多个同代码记录，请补充 market 后重试。",
+            "candidates": [_stock_to_dict(row) for row in rows],
+            "count": len(rows),
+        }
+
+    stock = rows[0]
+    return {
+        "resolved": True,
+        "stock_id": stock.id,
+        "symbol": stock.symbol,
+        "name": stock.name,
+        "market": stock.market,
+    }
+
+
 def _reorder_stocks(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     items = arguments.get("items")
     if not isinstance(items, list) or not items:
         return {"updated": 0}
 
-    ids = [int(item["id"]) for item in items if "id" in item and "sort_order" in item]
+    ids = [int(item["id"])
+           for item in items if "id" in item and "sort_order" in item]
     rows = db.query(Stock).filter(Stock.id.in_(ids)).all()
     row_map = {row.id: row for row in rows}
 
@@ -923,7 +970,8 @@ def _list_news(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     # 过滤来源
     if source_filter:
         if isinstance(source_filter, str):
-            sources = {s.strip() for s in source_filter.split(",") if s.strip()}
+            sources = {s.strip()
+                       for s in source_filter.split(",") if s.strip()}
         else:
             sources = {str(s).strip() for s in source_filter if str(s).strip()}
         news_list = [n for n in news_list if n.source in sources]
@@ -963,7 +1011,7 @@ def _get_klines(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
             perf = fetch_fund_performance(symbol)
             if not perf or not perf.get("points"):
                 return {"symbol": symbol, "market": market, "klines": [], "count": 0}
-            
+
             points = perf["points"][-days:] if days > 0 else perf["points"]
             klines = [
                 {
@@ -1152,7 +1200,8 @@ def _get_history(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     _require_args(arguments, ["history_id"])
     history_id = int(arguments["history_id"])
 
-    record = db.query(AnalysisHistory).filter(AnalysisHistory.id == history_id).first()
+    record = db.query(AnalysisHistory).filter(
+        AnalysisHistory.id == history_id).first()
     if not record:
         raise McpToolError(
             error_code=ERR_NOT_FOUND,
@@ -1228,7 +1277,8 @@ def _list_agents(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     elif kind == AGENT_KIND_CAPABILITY:
         query = query.filter(AgentConfig.kind == AGENT_KIND_CAPABILITY)
 
-    agents = query.order_by(AgentConfig.display_order.asc(), AgentConfig.name.asc()).all()
+    agents = query.order_by(
+        AgentConfig.display_order.asc(), AgentConfig.name.asc()).all()
 
     items = [
         {
@@ -1263,7 +1313,8 @@ def _agents_health(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
             AgentConfig.kind == AGENT_KIND_WORKFLOW,
             AgentConfig.visible == True,
         )
-    agents = query.order_by(AgentConfig.display_order.asc(), AgentConfig.name.asc()).all()
+    agents = query.order_by(
+        AgentConfig.display_order.asc(), AgentConfig.name.asc()).all()
 
     out = []
     next_24h_count = 0
@@ -1324,7 +1375,8 @@ def _trigger_agent(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     symbol = arguments.get("symbol")
     market = arguments.get("market")
 
-    agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+    agent = db.query(AgentConfig).filter(
+        AgentConfig.name == agent_name).first()
     if not agent:
         raise McpToolError(
             error_code=ERR_NOT_FOUND,
@@ -1347,7 +1399,8 @@ def _trigger_agent(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         def _run():
             try:
                 if symbol and market:
-                    asyncio.run(run_agent_for_symbol(agent_name, symbol, market))
+                    asyncio.run(run_agent_for_symbol(
+                        agent_name, symbol, market))
                 else:
                     from server import run_agent
                     asyncio.run(run_agent(agent_name))
@@ -1409,7 +1462,8 @@ def _list_price_alerts(arguments: dict[str, Any], db: Session) -> dict[str, Any]
     if enabled_only:
         query = query.filter(PriceAlertRule.enabled == True)
 
-    rows = query.order_by(PriceAlertRule.updated_at.desc(), PriceAlertRule.id.desc()).all()
+    rows = query.order_by(PriceAlertRule.updated_at.desc(),
+                          PriceAlertRule.id.desc()).all()
     items = [_alert_rule_to_dict(r) for r in rows]
     return {"items": items, "count": len(items)}
 
@@ -1431,8 +1485,10 @@ def _validate_condition_group(group: dict) -> None:
             hint="至少需要一个条件项",
         )
 
-    allowed_types = {"price", "change_pct", "turnover", "volume", "volume_ratio"}
-    allowed_ops = {">=", "<=", ">", "<", "==", "=", "!=", "<>", "between", "in"}
+    allowed_types = {"price", "change_pct",
+                     "turnover", "volume", "volume_ratio"}
+    allowed_ops = {">=", "<=", ">", "<", "==",
+                   "=", "!=", "<>", "between", "in"}
     for it in items:
         if it.get("type") not in allowed_types:
             raise McpToolError(
@@ -1481,7 +1537,8 @@ def _create_price_alert(arguments: dict[str, Any], db: Session) -> dict[str, Any
         condition_group=condition_group,
         market_hours_mode=arguments.get("market_hours_mode", "trading_only"),
         cooldown_minutes=max(0, int(arguments.get("cooldown_minutes", 30))),
-        max_triggers_per_day=max(0, int(arguments.get("max_triggers_per_day", 3))),
+        max_triggers_per_day=max(
+            0, int(arguments.get("max_triggers_per_day", 3))),
         repeat_mode=arguments.get("repeat_mode", "repeat"),
         expire_at=expire_at,
         notify_channel_ids=arguments.get("notify_channel_ids", []),
@@ -1496,7 +1553,8 @@ def _update_price_alert(arguments: dict[str, Any], db: Session) -> dict[str, Any
     _require_args(arguments, ["rule_id"])
     rule_id = int(arguments["rule_id"])
 
-    rule = db.query(PriceAlertRule).filter(PriceAlertRule.id == rule_id).first()
+    rule = db.query(PriceAlertRule).filter(
+        PriceAlertRule.id == rule_id).first()
     if not rule:
         raise McpToolError(
             error_code=ERR_NOT_FOUND,
@@ -1516,7 +1574,8 @@ def _update_price_alert(arguments: dict[str, Any], db: Session) -> dict[str, Any
     if "cooldown_minutes" in arguments:
         rule.cooldown_minutes = max(0, int(arguments["cooldown_minutes"]))
     if "max_triggers_per_day" in arguments:
-        rule.max_triggers_per_day = max(0, int(arguments["max_triggers_per_day"]))
+        rule.max_triggers_per_day = max(
+            0, int(arguments["max_triggers_per_day"]))
     if "repeat_mode" in arguments:
         rule.repeat_mode = arguments["repeat_mode"]
     if "expire_at" in arguments:
@@ -1544,7 +1603,8 @@ def _delete_price_alert(arguments: dict[str, Any], db: Session) -> dict[str, Any
     _require_args(arguments, ["rule_id"])
     rule_id = int(arguments["rule_id"])
 
-    rule = db.query(PriceAlertRule).filter(PriceAlertRule.id == rule_id).first()
+    rule = db.query(PriceAlertRule).filter(
+        PriceAlertRule.id == rule_id).first()
     if not rule:
         raise McpToolError(
             error_code=ERR_NOT_FOUND,
@@ -1562,7 +1622,8 @@ def _toggle_price_alert(arguments: dict[str, Any], db: Session) -> dict[str, Any
     rule_id = int(arguments["rule_id"])
     enabled = bool(arguments["enabled"])
 
-    rule = db.query(PriceAlertRule).filter(PriceAlertRule.id == rule_id).first()
+    rule = db.query(PriceAlertRule).filter(
+        PriceAlertRule.id == rule_id).first()
     if not rule:
         raise McpToolError(
             error_code=ERR_NOT_FOUND,
@@ -1588,7 +1649,8 @@ def _scan_price_alerts(arguments: dict[str, Any], db: Session) -> dict[str, Any]
     def _run():
         try:
             result_holder["result"] = asyncio.run(
-                ENGINE.scan_once(dry_run=dry_run, bypass_market_hours=bypass_market_hours)
+                ENGINE.scan_once(
+                    dry_run=dry_run, bypass_market_hours=bypass_market_hours)
             )
         except Exception as e:
             result_holder["error"] = str(e)
@@ -1775,7 +1837,8 @@ def _get_quotes_batch(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
 
         try:
             market_code = MarketCode(market)
-            tencent_symbols = [_tencent_symbol(s, market_code) for s in symbols]
+            tencent_symbols = [_tencent_symbol(
+                s, market_code) for s in symbols]
             quote_items = _fetch_tencent_quotes(tencent_symbols)
             for qi in quote_items:
                 results.append({
@@ -1794,7 +1857,6 @@ def _get_quotes_batch(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
 
 
 # 需要导入 timedelta
-from datetime import timedelta
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -2314,8 +2376,10 @@ TOOLS: list[dict[str, Any]] = [
         },
         "outputSchema": {"type": "object", "description": "新创建的自选股对象。"},
         "examples": [
-            {"title": "添加A股", "arguments": {"symbol": "600519", "name": "贵州茅台", "market": "CN"}},
-            {"title": "添加基金", "arguments": {"symbol": "161725", "name": "招商中证白酒指数", "market": "FUND"}},
+            {"title": "添加A股", "arguments": {
+                "symbol": "600519", "name": "贵州茅台", "market": "CN"}},
+            {"title": "添加基金", "arguments": {"symbol": "161725",
+                                            "name": "招商中证白酒指数", "market": "FUND"}},
         ],
     },
     {
@@ -2379,6 +2443,48 @@ TOOLS: list[dict[str, Any]] = [
         "examples": [
             {"title": "搜索茅台", "arguments": {"query": "茅台"}},
             {"title": "搜索基金", "arguments": {"query": "白酒", "market": "FUND"}},
+        ],
+    },
+    {
+        "name": "stocks.resolve",
+        "description": "按证券代码解析 stock_id",
+        "access": "read",
+        "tags": ["stocks", "resolve", "read"],
+        "risk_level": "low",
+        "cost_hint": "low",
+        "inputSchema": {
+            "type": "object",
+            "description": "根据已存在于自选股中的证券代码查询 stock_id。",
+            "required": ["symbol"],
+            "properties": {
+                "symbol": {"type": "string", "description": "证券代码，例如 600519。"},
+                "market": {
+                    "type": "string",
+                    "enum": ["", "CN", "HK", "US", "FUND"],
+                    "default": "",
+                    "description": "可选市场过滤。若同代码跨市场重复，建议传入。",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "description": "解析结果。resolved=true 时可直接取 stock_id。",
+            "properties": {
+                "resolved": {"type": "boolean", "description": "是否唯一解析成功。"},
+                "stock_id": {"type": "integer", "description": "唯一匹配时返回的 stock_id。"},
+                "symbol": {"type": "string", "description": "证券代码。"},
+                "name": {"type": "string", "description": "证券名称。"},
+                "market": {"type": "string", "description": "市场代码。"},
+                "candidates": {"type": "array", "description": "存在歧义时返回候选列表。"},
+                "count": {"type": "integer", "description": "候选条数。"},
+                "message": {"type": "string", "description": "提示信息。"},
+            },
+        },
+        "examples": [
+            {"title": "解析A股 stock_id", "arguments": {
+                "symbol": "600519", "market": "CN"}},
+            {"title": "仅按代码解析", "arguments": {"symbol": "600519"}},
         ],
     },
     {
@@ -2521,8 +2627,10 @@ TOOLS: list[dict[str, Any]] = [
         },
         "outputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}, "klines": {"type": "array"}, "count": {"type": "integer"}}},
         "examples": [
-            {"title": "日K线", "arguments": {"symbol": "600519", "market": "CN", "days": 60}},
-            {"title": "基金净值", "arguments": {"symbol": "161725", "market": "FUND", "days": 90}},
+            {"title": "日K线", "arguments": {
+                "symbol": "600519", "market": "CN", "days": 60}},
+            {"title": "基金净值", "arguments": {
+                "symbol": "161725", "market": "FUND", "days": 90}},
         ],
     },
     {
@@ -2685,7 +2793,8 @@ TOOLS: list[dict[str, Any]] = [
         "outputSchema": {"type": "object", "properties": {"triggered": {"type": "boolean"}, "agent_name": {"type": "string"}, "message": {"type": "string"}}},
         "examples": [
             {"title": "触发日报", "arguments": {"agent_name": "daily_report"}},
-            {"title": "单只分析", "arguments": {"agent_name": "chart_analyst", "symbol": "600519", "market": "CN"}},
+            {"title": "单只分析", "arguments": {
+                "agent_name": "chart_analyst", "symbol": "600519", "market": "CN"}},
         ],
     },
     # ==================== 价格提醒 ====================
@@ -2941,7 +3050,7 @@ def _call_tool(
         return _reorder_positions(arguments, db)
     if name == "portfolio.summary":
         return _portfolio_summary(arguments, db)
-    
+
     # 自选股管理
     if name == "stocks.list":
         return _list_watchlist(arguments, db)
@@ -2955,9 +3064,11 @@ def _call_tool(
         return _delete_stock(arguments, db)
     if name == "stocks.search":
         return _search_stocks(arguments, db)
+    if name == "stocks.resolve":
+        return _resolve_stock(arguments, db)
     if name == "stocks.reorder":
         return _reorder_stocks(arguments, db)
-    
+
     # 账户管理
     if name == "accounts.list":
         return _list_accounts(arguments, db)
@@ -2967,29 +3078,29 @@ def _call_tool(
         return _update_account(arguments, db)
     if name == "accounts.delete":
         return _delete_account(arguments, db)
-    
+
     # 新闻资讯
     if name == "news.list":
         return _list_news(arguments, db)
-    
+
     # K线与技术指标
     if name == "klines.get":
         return _get_klines(arguments, db)
     if name == "klines.summary":
         return _get_kline_summary(arguments, db)
-    
+
     # 分析历史
     if name == "history.list":
         return _list_history(arguments, db)
     if name == "history.get":
         return _get_history(arguments, db)
-    
+
     # 建议池
     if name == "suggestions.latest":
         return _get_latest_suggestions(arguments, db)
     if name == "suggestions.stock":
         return _get_stock_suggestions(arguments, db)
-    
+
     # Agent 操作
     if name == "agents.list":
         return _list_agents(arguments, db)
@@ -2997,7 +3108,7 @@ def _call_tool(
         return _agents_health(arguments, db)
     if name == "agents.trigger":
         return _trigger_agent(arguments, db)
-    
+
     # 价格提醒
     if name == "price_alerts.list":
         return _list_price_alerts(arguments, db)
@@ -3011,13 +3122,13 @@ def _call_tool(
         return _toggle_price_alert(arguments, db)
     if name == "price_alerts.scan":
         return _scan_price_alerts(arguments, db)
-    
+
     # 基金专用
     if name == "funds.overview":
         return _fund_overview(arguments, db)
     if name == "funds.holdings":
         return _fund_holdings(arguments, db)
-    
+
     # 工具类
     if name == "exchange_rates.get":
         return _get_exchange_rates(arguments, db)
@@ -3025,7 +3136,7 @@ def _call_tool(
         return _get_quote(arguments, db)
     if name == "quotes.batch":
         return _get_quotes_batch(arguments, db)
-    
+
     # 市场与诊断
     if name == "market.indices":
         return _market_indices(arguments, db)
@@ -3037,7 +3148,7 @@ def _call_tool(
         return _mcp_auth_status(arguments, principal)
     if name == "mcp.version":
         return _mcp_version(arguments, db)
-    
+
     raise McpToolError(
         error_code=ERR_NOT_FOUND,
         message=f"未知工具: {name}",
