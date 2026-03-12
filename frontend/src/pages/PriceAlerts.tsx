@@ -6,6 +6,7 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import PriceAlertFormDialog, { type AlertConditionItem, type PriceAlertFormState, type PriceAlertSubmitPayload } from '@panwatch/biz-ui/components/price-alert-form-dialog'
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog'
 
 type RuleOp = 'and' | 'or'
 
@@ -83,6 +84,7 @@ function conditionText(item: AlertConditionItem): string {
 
 export default function PriceAlertsPage() {
   const { toast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const location = useLocation()
   const [loading, setLoading] = useState(true)
   const [rules, setRules] = useState<AlertRule[]>([])
@@ -230,7 +232,12 @@ export default function PriceAlertsPage() {
   }
 
   const removeRule = async (r: AlertRule) => {
-    if (!window.confirm(`确认删除规则「${r.name || r.stock_name}」？`)) return
+    if (!(await confirm({
+      title: '删除提醒规则',
+      description: `确认删除规则「${r.name || r.stock_name}」？`,
+      variant: 'destructive',
+      confirmText: '删除',
+    }))) return
     try {
       await fetchAPI(`/price-alerts/${r.id}`, { method: 'DELETE' })
       await load()
@@ -373,6 +380,7 @@ export default function PriceAlertsPage() {
           </div>
         </DialogContent>
       </Dialog>
+      {confirmDialog}
     </div>
   )
 }

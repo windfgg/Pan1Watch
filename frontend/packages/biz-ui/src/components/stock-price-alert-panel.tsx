@@ -5,6 +5,7 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import PriceAlertFormDialog, { type AlertConditionItem, type PriceAlertFormState, type PriceAlertSubmitPayload } from '@panwatch/biz-ui/components/price-alert-form-dialog'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog'
 
 interface StockItem {
   id: number
@@ -73,6 +74,7 @@ export default function StockPriceAlertPanel(props: {
   onChanged?: () => void
 }) {
   const { toast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const symbol = String(props.symbol || '').trim()
   const market = String(props.market || 'CN').trim().toUpperCase()
   const mode = props.mode || 'icon'
@@ -234,7 +236,12 @@ export default function StockPriceAlertPanel(props: {
   }
 
   const removeRule = async (r: AlertRule) => {
-    if (!window.confirm(`确认删除规则「${r.name || '提醒'}」？`)) return
+    if (!(await confirm({
+      title: '删除提醒规则',
+      description: `确认删除规则「${r.name || '提醒'}」？`,
+      variant: 'destructive',
+      confirmText: '删除',
+    }))) return
     try {
       await fetchAPI(`/price-alerts/${r.id}`, { method: 'DELETE' })
       await load()
@@ -335,6 +342,7 @@ export default function StockPriceAlertPanel(props: {
         submitLabel="保存规则"
         onSubmit={submitForm}
       />
+      {confirmDialog}
     </>
   )
 }

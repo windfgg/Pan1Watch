@@ -6,6 +6,7 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 import { fetchAPI } from '@panwatch/api'
 import { mapLoggerName, loggerOptions } from '@/lib/logger-map'
 import { useLocalStorage } from '@/lib/utils'
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog'
 
 interface LogEntry {
   id: number
@@ -71,6 +72,7 @@ function unique(arr: string[]) {
 }
 
 export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpenChange: (v: boolean) => void }) {
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -191,7 +193,12 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
   }
 
   const handleClear = async () => {
-    if (!confirm('确定清空所有日志？')) return
+    if (!(await confirm({
+      title: '清空日志',
+      description: '确定清空所有日志？该操作不可恢复。',
+      variant: 'destructive',
+      confirmText: '清空',
+    }))) return
     await fetchAPI('/logs', { method: 'DELETE' })
     setLogs([])
     setTotal(0)
@@ -222,10 +229,11 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
   const loggerFilterOptions = loggerOptions()
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[90vw] max-w-[90vw] h-[90vh] max-h-[90vh] flex flex-col overflow-hidden" onInteractOutside={(e) => e.preventDefault()}>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+          <DialogTitle className="flex items-center gap-2 pr-12 flex-wrap">
             <span>日志</span>
             <Button variant={autoRefresh ? 'default' : 'secondary'} size="sm" className="h-7" onClick={() => setAutoRefresh(v => !v)}>
               <RefreshCw className={`w-3.5 h-3.5 ${autoRefresh ? 'animate-spin' : ''}`} />
@@ -395,6 +403,8 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
           )}
         </div>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+      {confirmDialog}
+    </>
   )
 }

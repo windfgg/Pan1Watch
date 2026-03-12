@@ -7,6 +7,7 @@ import { Badge } from '@panwatch/base-ui/components/ui/badge'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@panwatch/base-ui/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@panwatch/base-ui/components/ui/dialog'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog'
 
 interface HistoryRecord {
   id: number
@@ -38,6 +39,7 @@ const CAPABILITY_AGENT_KEYS = ['news_digest', 'chart_analyst']
 
 export default function HistoryPage() {
   const { toast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [records, setRecords] = useState<HistoryRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedAgent, setSelectedAgent] = useState<string>('all')
@@ -119,7 +121,7 @@ export default function HistoryPage() {
   }, [records, selectedId])
 
   const deleteRecord = async (id: number) => {
-    if (!confirm('确定删除这条记录吗？')) return
+    if (!(await confirm({ description: '确定删除这条记录吗？', variant: 'destructive', confirmText: '删除' }))) return
     try {
       await fetchAPI(`/history/${id}`, { method: 'DELETE' })
       toast('已删除', 'success')
@@ -347,6 +349,7 @@ export default function HistoryPage() {
           ) : null}
         </DialogContent>
       </Dialog>
+      {confirmDialog}
     </div>
   )
 }

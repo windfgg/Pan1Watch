@@ -8,6 +8,7 @@ import { Switch } from '@panwatch/base-ui/components/ui/switch'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@panwatch/base-ui/components/ui/dialog'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@panwatch/base-ui/components/ui/select'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog'
 
 interface Setting {
   key: string
@@ -181,6 +182,7 @@ export default function SettingsPage() {
   const importFileRef = useRef<HTMLInputElement | null>(null)
 
   const { toast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const builtinTemplates: Array<{ name: string; desc: string; payload: TemplatePayload }> = [
     {
@@ -367,7 +369,12 @@ export default function SettingsPage() {
   }
 
   const deleteService = async (id: number) => {
-    if (!confirm('删除服务商将同时删除其下所有模型，确定？')) return
+    if (!(await confirm({
+      title: '删除服务商',
+      description: '删除服务商将同时删除其下所有模型，确定继续吗？',
+      variant: 'destructive',
+      confirmText: '删除',
+    }))) return
     try {
       await fetchAPI(`/providers/services/${id}`, { method: 'DELETE' })
       load()
@@ -403,7 +410,7 @@ export default function SettingsPage() {
   }
 
   const deleteModel = async (id: number) => {
-    if (!confirm('确定删除此模型？')) return
+    if (!(await confirm({ description: '确定删除此模型？', variant: 'destructive', confirmText: '删除' }))) return
     try {
       await fetchAPI(`/providers/models/${id}`, { method: 'DELETE' })
       load()
@@ -479,7 +486,7 @@ export default function SettingsPage() {
   }
 
   const deleteChannel = async (id: number) => {
-    if (!confirm('确定删除此通知渠道？')) return
+    if (!(await confirm({ description: '确定删除此通知渠道？', variant: 'destructive', confirmText: '删除' }))) return
     try {
       await fetchAPI(`/channels/${id}`, { method: 'DELETE' })
       load()
@@ -1141,6 +1148,7 @@ export default function SettingsPage() {
           PanWatch v{version}
         </div>
       )}
+      {confirmDialog}
     </div>
   )
 }
