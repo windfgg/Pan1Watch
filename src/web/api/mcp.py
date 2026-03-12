@@ -54,6 +54,7 @@ from src.web.models import (
     Position,
     Stock,
     StockAgent,
+    LogEntry,
     AgentConfig,
     AgentRun,
     AnalysisHistory,
@@ -156,6 +157,17 @@ def _audit_write_tool(
     safe_args = {
         k: v for k, v in arguments.items() if k not in {"password", "token", "authorization"}
     }
+    mcp_tags = {
+        "mcp": {
+            "tool_name": tool_name,
+            "status": status_text,
+            "user": str(principal.get("user") or ""),
+            "auth": str(principal.get("auth") or ""),
+            "permission": str(principal.get("permission") or ""),
+            "duration_ms": int(duration_ms),
+            "arguments": safe_args,
+        }
+    }
     logger.info(
         "[mcp.audit] user=%s auth=%s perm=%s tool=%s status=%s duration_ms=%s args=%s",
         principal.get("user"),
@@ -165,7 +177,109 @@ def _audit_write_tool(
         status_text,
         duration_ms,
         safe_args,
+        extra={
+            "event": "mcp.audit",
+            "agent_name": "mcp",
+            "tags": mcp_tags,
+        },
     )
+
+
+def _mcp_logs_query(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
+    level = str(arguments.get("level", "")).strip().upper()
+    q = str(arguments.get("q", "")).strip()
+    tool_name = str(arguments.get("tool_name", "")).strip()
+    status_text = str(arguments.get("status", "")).strip()
+    user = str(arguments.get("user", "")).strip()
+    auth = str(arguments.get("auth", "")).strip().lower()
+    limit = max(1, min(200, int(arguments.get("limit", 50))))
+    before_id = max(0, int(arguments.get("before_id", 0)))
+
+    query = db.query(LogEntry).filter(LogEntry.event == "mcp.audit")
+
+    if level:
+        levels = [it.strip().upper() for it in level.split(",") if it.strip()]
+        if levels:
+            query = query.filter(LogEntry.level.in_(levels))
+    if q:
+        query = query.filter(
+            or_(
+                LogEntry.message.contains(q),
+                LogEntry.logger_name.contains(q),
+                LogEntry.event.contains(q),
+            )
+        )
+    if tool_name:
+        query = query.filter(
+            or_(
+                func.json_extract(LogEntry.tags, "$.mcp.tool_name") == tool_name,
+                LogEntry.message.contains(f"tool={tool_name}"),
+            )
+        )
+    if status_text:
+        query = query.filter(
+            or_(
+                func.json_extract(LogEntry.tags, "$.mcp.status") == status_text,
+                LogEntry.message.contains(f"status={status_text}"),
+            )
+        )
+    if user:
+        query = query.filter(
+            or_(
+                func.json_extract(LogEntry.tags, "$.mcp.user") == user,
+                LogEntry.message.contains(f"user={user}"),
+            )
+        )
+    if auth:
+        query = query.filter(
+            or_(
+                func.lower(func.json_extract(LogEntry.tags, "$.mcp.auth")) == auth,
+                LogEntry.message.contains(f"auth={auth}"),
+            )
+        )
+
+    if before_id > 0:
+        rows = (
+            query.filter(LogEntry.id < before_id)
+            .order_by(LogEntry.id.desc())
+            .limit(limit + 1)
+            .all()
+        )
+    else:
+        rows = query.order_by(LogEntry.id.desc()).limit(limit + 1).all()
+
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_before_id = rows[-1].id if rows else None
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        tags = row.tags if isinstance(row.tags, dict) else {}
+        mcp_meta = tags.get("mcp", {}) if isinstance(tags, dict) else {}
+        ts = row.timestamp
+        if ts and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        items.append(
+            {
+                "id": row.id,
+                "timestamp": ts.isoformat() if ts else "",
+                "level": row.level,
+                "tool_name": str(mcp_meta.get("tool_name") or ""),
+                "status": str(mcp_meta.get("status") or ""),
+                "user": str(mcp_meta.get("user") or ""),
+                "auth": str(mcp_meta.get("auth") or ""),
+                "duration_ms": int(mcp_meta.get("duration_ms") or 0),
+                "arguments": mcp_meta.get("arguments") if isinstance(mcp_meta.get("arguments"), dict) else {},
+                "message": row.message or "",
+            }
+        )
+
+    return {
+        "items": items,
+        "count": len(items),
+        "has_more": has_more,
+        "next_before_id": next_before_id,
+    }
 
 
 def _jsonrpc_result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -798,11 +912,52 @@ def _search_stocks(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
 
 def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     _require_args(arguments, ["symbol"])
-    symbol = str(arguments["symbol"]).strip().upper()
+    symbol_raw = str(arguments["symbol"]).strip().upper()
     market_raw = arguments.get("market")
     market = str(market_raw).strip().upper() if market_raw is not None else ""
 
-    query = db.query(Stock).filter(Stock.symbol == symbol)
+    def _normalize_symbol(code: str, mkt: str) -> str:
+        c = (code or "").strip().upper()
+        for p in ("SH", "SZ", "BJ", "US", "HK"):
+            if c.startswith(p):
+                c = c[len(p):]
+                break
+        if "." in c:
+            c = c.split(".")[0]
+        if c.isdigit():
+            if mkt in ("CN", "FUND"):
+                c = c.zfill(6)
+            elif mkt == "HK":
+                c = c.zfill(5)
+        return c
+
+    symbol = _normalize_symbol(symbol_raw, market)
+
+    def _guess_market_priority(sym: str) -> list[str]:
+        if not sym:
+            return ["CN", "FUND", "HK", "US"]
+        if sym.isalpha():
+            return ["US", "HK", "CN", "FUND"]
+        if sym.isdigit():
+            if len(sym) == 5:
+                return ["HK", "CN", "FUND", "US"]
+            if len(sym) == 6:
+                fund_prefixes = ("15", "16", "50", "51", "52", "56", "58", "59")
+                cn_stock_prefixes = ("00", "30", "60", "68", "83", "87", "43", "92")
+                if sym.startswith(fund_prefixes):
+                    return ["FUND", "CN", "HK", "US"]
+                if sym.startswith(cn_stock_prefixes):
+                    return ["CN", "FUND", "HK", "US"]
+                return ["CN", "FUND", "HK", "US"]
+        return ["CN", "FUND", "HK", "US"]
+
+    symbol_candidates = {symbol}
+    # market 未指定时，补齐常见数字代码位数，容忍外部调用传入丢前导零。
+    if not market and symbol.isdigit() and len(symbol) <= 6:
+        symbol_candidates.add(symbol.zfill(6))
+        symbol_candidates.add(symbol.zfill(5))
+
+    query = db.query(Stock).filter(Stock.symbol.in_(list(symbol_candidates)))
     if market:
         if market not in ("CN", "HK", "US", "FUND"):
             raise McpToolError(
@@ -813,6 +968,69 @@ def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         query = query.filter(Stock.market == market)
 
     rows = query.order_by(Stock.id.asc()).all()
+
+    # A 股 ETF 常被归类为 FUND，兼容 market=CN/FUND 的解析。
+    if not rows and market in ("CN", "FUND"):
+        fallback_markets = ["CN", "FUND"]
+        rows = db.query(Stock).filter(
+            Stock.symbol.in_(list(symbol_candidates)),
+            Stock.market.in_(fallback_markets),
+        ).order_by(Stock.id.asc()).all()
+
+    # market 未传时，按代码形态自动推断优先级并返回最佳匹配，降低调用参数复杂度。
+    if len(rows) > 1 and not market:
+        market_priority = _guess_market_priority(symbol)
+        by_market: dict[str, list[Stock]] = {}
+        for r in rows:
+            by_market.setdefault(str(r.market).upper(), []).append(r)
+        for mkt in market_priority:
+            if by_market.get(mkt):
+                rows = [sorted(by_market[mkt], key=lambda x: x.id)[0]]
+                break
+
+    # 若自选股中不存在，尝试从股票搜索结果精确命中后自动补建，便于直接拿 stock_id 落库持仓。
+    if not rows:
+        search_markets = [market] if market else _guess_market_priority(symbol)
+        if market in ("CN", "FUND"):
+            search_markets = ["CN", "FUND"]
+
+        matched_candidate: dict[str, Any] | None = None
+        for mkt in search_markets:
+            candidates = search_stocks(symbol, mkt, limit=50)
+            for c in candidates:
+                c_symbol = _normalize_symbol(str(c.get("symbol", "")), str(c.get("market", "")).upper())
+                c_market = str(c.get("market", "")).upper()
+                if c_symbol in symbol_candidates and (not market or c_market == market or (market in ("CN", "FUND") and c_market in ("CN", "FUND"))):
+                    matched_candidate = c
+                    break
+            if matched_candidate:
+                break
+
+        if matched_candidate:
+            cand_symbol = _normalize_symbol(
+                str(matched_candidate.get("symbol", "")),
+                str(matched_candidate.get("market", "")).upper(),
+            )
+            cand_market = str(matched_candidate.get("market", "")).strip().upper() or (market or "CN")
+            existing = db.query(Stock).filter(
+                Stock.symbol == cand_symbol,
+                Stock.market == cand_market,
+            ).first()
+            if existing:
+                rows = [existing]
+            else:
+                max_order = db.query(func.max(Stock.sort_order)).scalar() or 0
+                created = Stock(
+                    symbol=cand_symbol,
+                    name=str(matched_candidate.get("name", "")).strip() or cand_symbol,
+                    market=cand_market,
+                    sort_order=int(max_order) + 1,
+                )
+                db.add(created)
+                db.commit()
+                db.refresh(created)
+                rows = [created]
+
     if not rows:
         raise McpToolError(
             error_code=ERR_NOT_FOUND,
@@ -822,13 +1040,8 @@ def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         )
 
     if len(rows) > 1 and not market:
-        return {
-            "resolved": False,
-            "symbol": symbol,
-            "message": "存在多个同代码记录，请补充 market 后重试。",
-            "candidates": [_stock_to_dict(row) for row in rows],
-            "count": len(rows),
-        }
+        # 理论上已在上方按优先级收敛；兜底保持可解析，避免调用方因缺省 market 失败。
+        rows = [rows[0]]
 
     stock = rows[0]
     return {
@@ -880,7 +1093,7 @@ def _validate_account_market_currency(market: str, base_currency: str) -> None:
     expected = _MARKET_CURRENCY_MAP.get(market)
     if expected and base_currency != expected:
         raise McpToolError(
-            error_code=ERR_INVALID_ARGS,
+            error_code=ERR_INVALID_PARAMS,
             message=f"{market} 账户的 base_currency 需为 {expected}",
             hint=f"请传入 base_currency={expected}",
         )
@@ -914,13 +1127,13 @@ def _create_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     base_currency = str(arguments.get("base_currency", "CNY") or "CNY").upper()
     if market not in _SUPPORTED_ACCOUNT_MARKETS:
         raise McpToolError(
-            error_code=ERR_INVALID_ARGS,
+            error_code=ERR_INVALID_PARAMS,
             message="market 仅支持 CN/HK/US/FUND",
             hint="请传入 market=CN/HK/US/FUND",
         )
     if base_currency not in _SUPPORTED_ACCOUNT_CURRENCIES:
         raise McpToolError(
-            error_code=ERR_INVALID_ARGS,
+            error_code=ERR_INVALID_PARAMS,
             message="base_currency 仅支持 CNY/HKD/USD",
             hint="请传入 base_currency=CNY/HKD/USD",
         )
@@ -960,7 +1173,7 @@ def _update_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         next_market = str(arguments["market"] or "CN").upper()
         if next_market not in _SUPPORTED_ACCOUNT_MARKETS:
             raise McpToolError(
-                error_code=ERR_INVALID_ARGS,
+                error_code=ERR_INVALID_PARAMS,
                 message="market 仅支持 CN/HK/US/FUND",
                 hint="请传入 market=CN/HK/US/FUND",
             )
@@ -968,7 +1181,7 @@ def _update_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         next_base_currency = str(arguments["base_currency"] or "CNY").upper()
         if next_base_currency not in _SUPPORTED_ACCOUNT_CURRENCIES:
             raise McpToolError(
-                error_code=ERR_INVALID_ARGS,
+                error_code=ERR_INVALID_PARAMS,
                 message="base_currency 仅支持 CNY/HKD/USD",
                 hint="请传入 base_currency=CNY/HKD/USD",
             )
@@ -2419,6 +2632,43 @@ TOOLS: list[dict[str, Any]] = [
         },
         "examples": [{"title": "查询版本", "arguments": {}}],
     },
+    {
+        "name": "mcp.logs.query",
+        "description": "查询 MCP 审计操作日志",
+        "access": "read",
+        "tags": ["mcp", "audit", "logs", "read"],
+        "risk_level": "low",
+        "cost_hint": "low",
+        "inputSchema": {
+            "type": "object",
+            "description": "查询 MCP 写操作审计日志，支持按工具、状态、用户筛选。",
+            "properties": {
+                "tool_name": {"type": "string", "description": "按工具名过滤，例如 positions.create。"},
+                "status": {"type": "string", "description": "按状态过滤，例如 success / error:MCP_RESOURCE_CONFLICT。"},
+                "user": {"type": "string", "description": "按 MCP 用户名过滤。"},
+                "auth": {"type": "string", "enum": ["", "basic", "bearer"], "default": "", "description": "按鉴权方式过滤。"},
+                "level": {"type": "string", "description": "日志级别过滤，逗号分隔。"},
+                "q": {"type": "string", "description": "关键词搜索。"},
+                "limit": {"type": "integer", "default": 50, "description": "返回条数 1-200。"},
+                "before_id": {"type": "integer", "default": 0, "description": "cursor 分页：取该 id 之前日志。"}
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "description": "审计日志项。"},
+                "count": {"type": "integer", "description": "本次返回条数。"},
+                "has_more": {"type": "boolean", "description": "是否还有更多。"},
+                "next_before_id": {"type": ["integer", "null"], "description": "下一页 cursor。"},
+            },
+        },
+        "examples": [
+            {"title": "查看最近审计日志", "arguments": {"limit": 20}},
+            {"title": "筛选持仓写操作", "arguments": {"tool_name": "positions.create", "limit": 20}},
+            {"title": "只看失败操作", "arguments": {"status": "error:MCP_RESOURCE_CONFLICT", "limit": 20}},
+        ],
+    },
     # ==================== 自选股管理 ====================
     {
         "name": "stocks.create",
@@ -3216,6 +3466,8 @@ def _call_tool(
         return _mcp_auth_status(arguments, principal)
     if name == "mcp.version":
         return _mcp_version(arguments, db)
+    if name == "mcp.logs.query":
+        return _mcp_logs_query(arguments, db)
 
     raise McpToolError(
         error_code=ERR_NOT_FOUND,

@@ -1,5 +1,7 @@
 import base64
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,7 +13,7 @@ from src.web.api import mcp
 from src.web.api.auth import create_token
 from src.web.api.auth import AUTH_USERNAME_KEY, PASSWORD_HASH_KEY, hash_password
 from src.web.database import get_db
-from src.web.models import Account, AppSettings, Base, Stock
+from src.web.models import Account, AppSettings, Base, Stock, LogEntry
 
 
 def _basic_auth_header(username: str, password: str) -> dict[str, str]:
@@ -35,6 +37,7 @@ class TestMcpPositions(unittest.TestCase):
         )
         TestingSessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=engine)
+        self.TestingSessionLocal = TestingSessionLocal
         Base.metadata.create_all(bind=engine)
 
         db = TestingSessionLocal()
@@ -94,6 +97,7 @@ class TestMcpPositions(unittest.TestCase):
         self.assertIn("stocks.list", names)
         self.assertIn("stocks.quotes", names)
         self.assertIn("stocks.resolve", names)
+        self.assertIn("mcp.logs.query", names)
         self.assertIn("mcp.health", names)
         self.assertIn("mcp.auth.status", names)
         self.assertIn("mcp.version", names)
@@ -132,6 +136,120 @@ class TestMcpPositions(unittest.TestCase):
         self.assertEqual(data["stock_id"], 1)
         self.assertEqual(data["symbol"], "600519")
 
+    def test_stock_resolve_cn_market_can_fallback_to_fund(self):
+        add_fund_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.create",
+                "arguments": {
+                    "symbol": "159217",
+                    "name": "港股通创新药ETF",
+                    "market": "FUND",
+                },
+            },
+            req_id=41,
+        )
+        self.assertEqual(add_fund_resp.status_code, 200)
+
+        resolve_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.resolve",
+                "arguments": {
+                    "symbol": "159217",
+                    "market": "CN",
+                },
+            },
+            req_id=42,
+        )
+        self.assertEqual(resolve_resp.status_code, 200)
+        data = resolve_resp.json()["result"]["structuredContent"]
+        self.assertTrue(data["resolved"])
+        self.assertEqual(data["symbol"], "159217")
+        self.assertEqual(data["market"], "FUND")
+
+    def test_stock_resolve_auto_create_from_search(self):
+        with patch("src.web.api.mcp.search_stocks") as mock_search:
+            mock_search.return_value = [
+                {"symbol": "000712", "name": "锦龙股份", "market": "CN"}
+            ]
+            resolve_resp = self._rpc(
+                "tools/call",
+                {
+                    "name": "stocks.resolve",
+                    "arguments": {
+                        "symbol": "000712",
+                        "market": "CN",
+                    },
+                },
+                req_id=43,
+            )
+
+        self.assertEqual(resolve_resp.status_code, 200)
+        data = resolve_resp.json()["result"]["structuredContent"]
+        self.assertTrue(data["resolved"])
+        self.assertEqual(data["symbol"], "000712")
+        self.assertEqual(data["market"], "CN")
+        self.assertIsInstance(data["stock_id"], int)
+
+        list_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.list",
+                "arguments": {},
+            },
+            req_id=44,
+        )
+        self.assertEqual(list_resp.status_code, 200)
+        items = list_resp.json()["result"]["structuredContent"]["items"]
+        symbols = {(it["symbol"], it["market"]) for it in items}
+        self.assertIn(("000712", "CN"), symbols)
+
+    def test_stock_resolve_symbol_only_prefers_fund_for_fund_prefix(self):
+        add_cn_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.create",
+                "arguments": {
+                    "symbol": "159217",
+                    "name": "某A股同码示例",
+                    "market": "CN",
+                },
+            },
+            req_id=45,
+        )
+        self.assertEqual(add_cn_resp.status_code, 200)
+
+        add_fund_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.create",
+                "arguments": {
+                    "symbol": "159217",
+                    "name": "港股通创新药ETF",
+                    "market": "FUND",
+                },
+            },
+            req_id=46,
+        )
+        self.assertEqual(add_fund_resp.status_code, 200)
+
+        resolve_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "stocks.resolve",
+                "arguments": {
+                    "symbol": "159217",
+                },
+            },
+            req_id=47,
+        )
+        self.assertEqual(resolve_resp.status_code, 200)
+        data = resolve_resp.json()["result"]["structuredContent"]
+        self.assertTrue(data["resolved"])
+        self.assertEqual(data["symbol"], "159217")
+        self.assertEqual(data["market"], "FUND")
+
     def test_auth_status_via_bearer(self):
         token, _ = create_token(expires_days=1)
         resp = self.client.post(
@@ -151,6 +269,49 @@ class TestMcpPositions(unittest.TestCase):
         data = resp.json()["result"]["structuredContent"]
         self.assertEqual(data["auth"], "bearer")
         self.assertIn("user", data)
+
+    def test_mcp_logs_query(self):
+        db = self.TestingSessionLocal()
+        try:
+            db.add(
+                LogEntry(
+                    timestamp=datetime(2026, 3, 12, 0, 0, 0, tzinfo=timezone.utc),
+                    level="INFO",
+                    logger_name="src.web.api.mcp",
+                    message="[mcp.audit] user=mcp_user auth=basic perm=rw tool=positions.create status=success duration_ms=12 args={}",
+                    event="mcp.audit",
+                    tags={
+                        "mcp": {
+                            "tool_name": "positions.create",
+                            "status": "success",
+                            "user": "mcp_user",
+                            "auth": "basic",
+                            "duration_ms": 12,
+                            "arguments": {},
+                        }
+                    },
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        resp = self._rpc(
+            "tools/call",
+            {
+                "name": "mcp.logs.query",
+                "arguments": {
+                    "tool_name": "positions.create",
+                    "status": "success",
+                    "limit": 10,
+                },
+            },
+            req_id=48,
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["result"]["structuredContent"]
+        self.assertGreaterEqual(data["count"], 1)
+        self.assertEqual(data["items"][0]["tool_name"], "positions.create")
 
     def test_invalid_params_returns_standard_error_data(self):
         resp = self._rpc(

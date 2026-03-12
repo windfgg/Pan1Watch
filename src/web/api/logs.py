@@ -79,6 +79,11 @@ def list_logs(
     run_id: str = Query("", description="运行ID"),
     agent_name: str = Query("", description="Agent 名称过滤"),
     event: str = Query("", description="事件过滤"),
+    mcp_only: bool = Query(False, description="仅返回 MCP 审计日志(event=mcp.audit)"),
+    mcp_tool: str = Query("", description="MCP 工具名过滤"),
+    mcp_status: str = Query("", description="MCP 审计状态过滤"),
+    mcp_user: str = Query("", description="MCP 用户过滤"),
+    mcp_auth: str = Query("", description="MCP 鉴权方式过滤: basic/bearer"),
     notify_status: str = Query("", description="通知状态过滤: attempted/skipped/sent/failed"),
     domain: str = Query("all", description="日志域: all/business/infra"),
     since: str = Query("", description="起始时间 ISO 格式"),
@@ -125,6 +130,38 @@ def list_logs(
             query = query.filter(LogEntry.event == parts[0])
         elif parts:
             query = query.filter(LogEntry.event.in_(parts))
+
+    if mcp_only:
+        query = query.filter(LogEntry.event == "mcp.audit")
+    if mcp_tool:
+        query = query.filter(
+            or_(
+                func.json_extract(LogEntry.tags, "$.mcp.tool_name") == mcp_tool,
+                LogEntry.message.contains(f"tool={mcp_tool}"),
+            )
+        )
+    if mcp_status:
+        query = query.filter(
+            or_(
+                func.json_extract(LogEntry.tags, "$.mcp.status") == mcp_status,
+                LogEntry.message.contains(f"status={mcp_status}"),
+            )
+        )
+    if mcp_user:
+        query = query.filter(
+            or_(
+                func.json_extract(LogEntry.tags, "$.mcp.user") == mcp_user,
+                LogEntry.message.contains(f"user={mcp_user}"),
+            )
+        )
+    if mcp_auth:
+        auth_norm = mcp_auth.strip().lower()
+        query = query.filter(
+            or_(
+                func.lower(func.json_extract(LogEntry.tags, "$.mcp.auth")) == auth_norm,
+                LogEntry.message.contains(f"auth={auth_norm}"),
+            )
+        )
     if notify_status:
         query = query.filter(LogEntry.notify_status == notify_status)
 
