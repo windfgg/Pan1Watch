@@ -20,6 +20,7 @@ interface AgentConfig {
   ai_model_id: number | null
   notify_channel_ids: number[]
   config: Record<string, unknown>
+  market_filter?: string[]  // 空数组表示通用，["FUND"]表示仅基金可用
 }
 
 interface StockAgentInfo {
@@ -292,6 +293,17 @@ export default function AgentsPage() {
 
   const filteredBindStocks = stocks
     .filter(s => {
+      // 根据 Agent 的 market_filter 过滤标的类型
+      if (!bindDialogAgent) return true
+      const mf = bindDialogAgent.market_filter || []
+      const stockMarket = (s.market || '').toUpperCase()
+      const isFund = stockMarket === 'FUND'
+      // 基金专属Agent只能绑定基金
+      if (mf.includes('FUND')) return isFund
+      // 通用Agent只能绑定股票（非基金）
+      return !isFund
+    })
+    .filter(s => {
       const q = bindKeyword.trim().toLowerCase()
       if (!q) return true
       return s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)
@@ -510,9 +522,11 @@ export default function AgentsPage() {
             const modeLabel = agent.execution_mode === 'single' ? '逐只分析' : '批量分析'
             const preview = previews[agent.name]
             const boundStocks = getBoundStocks(agent.name)
+            const isFundAgent = (agent.market_filter || []).includes('FUND')
+            const agentTypeLabel = isFundAgent ? '基金' : '通用'
             const boundSummary = boundStocks.length > 0
               ? `${boundStocks.slice(0, 3).map(s => s.name || s.symbol).join('、')}${boundStocks.length > 3 ? '、...更多' : ''}`
-              : '未绑定股票'
+              : isFundAgent ? '未绑定基金' : '未绑定股票'
             return (
               <div key={agent.name} className="card-hover p-4 md:p-6">
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 sm:gap-6">
@@ -521,6 +535,7 @@ export default function AgentsPage() {
                       <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${agent.enabled ? 'bg-emerald-500' : 'bg-border'}`} />
                       <h3 className="text-[15px] font-semibold text-foreground">{agent.display_name}</h3>
                       <Badge variant="secondary" className="text-[10px]">{modeLabel}</Badge>
+                      <Badge variant="outline" className={`text-[10px] ${isFundAgent ? 'border-amber-400/60 text-amber-600 dark:text-amber-400' : 'border-sky-400/60 text-sky-600 dark:text-sky-400'}`}>{agentTypeLabel}</Badge>
                       <button
                         type="button"
                         onClick={() => openBindDialog(agent)}
@@ -830,7 +845,9 @@ export default function AgentsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {bindDialogAgent ? `${bindDialogAgent.display_name} 股票绑定` : '股票绑定'}
+              {bindDialogAgent
+                ? `${bindDialogAgent.display_name} ${(bindDialogAgent.market_filter || []).includes('FUND') ? '基金' : '股票'}绑定`
+                : '绑定'}
             </DialogTitle>
             <DialogDescription>点击即可切换绑定/不绑定，不会覆盖该股票的其它 Agent 个性化配置</DialogDescription>
           </DialogHeader>

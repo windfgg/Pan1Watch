@@ -19,7 +19,7 @@ interface TestLogItem {
 }
 
 interface TestResult {
-  success: boolean
+  passed: boolean
   source_name: string
   source_type: string
   type_label: string
@@ -75,6 +75,8 @@ export default function DataSourcesPage() {
 
   const { toast } = useToast()
 
+  const isFundQuoteSource = form.type === 'quote' && form.provider === 'eastmoney_fund'
+
   const load = async () => {
     try {
       const data = await fetchAPI<DataSource[]>('/datasources')
@@ -122,6 +124,7 @@ export default function DataSourcesPage() {
       const payload = {
         priority: form.priority,
         test_symbols: testSymbols,
+        config: form.config,
       }
       await fetchAPI(`/datasources/${editId}`, { method: 'PUT', body: JSON.stringify(payload) })
       setDialogOpen(false)
@@ -270,12 +273,31 @@ export default function DataSourcesPage() {
                 />
               </div>
             </div>
+            {/* Config fields */}
+            {Object.entries(form.config || {}).filter(([key]) => key !== 'description').map(([key, value]) => {
+              const configDescription = form.config?.['description'] as string | undefined
+              return (
+                <div key={key}>
+                  <Label className="capitalize">{key}</Label>
+                  {configDescription && key === 'cookies' && (
+                    <p className="text-[11px] text-muted-foreground mb-1">{configDescription}</p>
+                  )}
+                  <Input
+                    value={String(value || '')}
+                    onChange={e => setForm({
+                    ...form,
+                    config: { ...form.config, [key]: e.target.value }
+                  })}
+                  placeholder={`请输入 ${key}`}
+                />
+              </div>
+            )})}
             <div>
-              <Label>测试股票代码 <span className="text-muted-foreground font-normal">(逗号分隔)</span></Label>
+              <Label>{isFundQuoteSource ? '测试基金代码' : '测试代码'} <span className="text-muted-foreground font-normal">(逗号分隔)</span></Label>
               <Input
                 value={testSymbolsInput}
                 onChange={e => setTestSymbolsInput(e.target.value)}
-                placeholder="如 601127, 600519"
+                placeholder={isFundQuoteSource ? '如 001186, 161725' : '如 601127, 600519'}
               />
             </div>
             <div className="flex justify-end gap-2 pt-2">
@@ -294,7 +316,7 @@ export default function DataSourcesPage() {
         >
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              {testResult?.success ? (
+              {testResult?.passed ? (
                 <Check className="w-5 h-5 text-emerald-500" />
               ) : (
                 <X className="w-5 h-5 text-red-500" />
@@ -312,8 +334,8 @@ export default function DataSourcesPage() {
             <div className="flex items-center gap-4 p-3 rounded-lg bg-accent/30">
               <div className="flex-1">
                 <div className="text-[11px] text-muted-foreground">状态</div>
-                <div className={`text-[13px] font-medium ${testResult?.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
-                  {testResult?.success ? '测试成功' : '测试失败'}
+                <div className={`text-[13px] font-medium ${testResult?.passed ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
+                  {testResult?.passed ? '测试成功' : '测试失败'}
                 </div>
               </div>
               <div className="flex-1">
@@ -364,7 +386,7 @@ export default function DataSourcesPage() {
 
             {/* Data Preview */}
             {/* Chart type - show image outside scrollable area */}
-            {testResult?.success && testResult.source_type === 'chart' && (testResult.data as {image?: string})?.image && (
+            {testResult?.passed && testResult.source_type === 'chart' && (testResult.data as {image?: string})?.image && (
               <div>
                 <div className="text-[12px] font-medium text-foreground mb-2">数据预览</div>
                 <div className="rounded-lg overflow-hidden border">
@@ -374,7 +396,7 @@ export default function DataSourcesPage() {
             )}
 
             {/* Other data types - in scrollable container */}
-            {testResult?.success && testResult.data && testResult.source_type !== 'chart' && Array.isArray(testResult.data) && testResult.data.length > 0 && (
+            {testResult?.passed && testResult.data && testResult.source_type !== 'chart' && Array.isArray(testResult.data) && testResult.data.length > 0 && (
               <div>
                 <div className="text-[12px] font-medium text-foreground mb-2">数据预览</div>
                 <div className="space-y-1.5 max-h-60 overflow-y-auto">

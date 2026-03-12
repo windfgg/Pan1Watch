@@ -132,3 +132,43 @@
     display: none;
   }
 }
+
+/* 数据变化高亮动画 - 涨红跌绿背景闪烁消散 */
+@keyframes highlight-fade-up {
+  0% {
+    box-shadow: inset 0 0 0 999px rgba(239, 68, 68, 0.24);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+@keyframes highlight-fade-down {
+  0% {
+    box-shadow: inset 0 0 0 999px rgba(16, 185, 129, 0.24);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+@keyframes highlight-fade-neutral {
+  0% {
+    box-shadow: inset 0 0 0 999px rgba(148, 163, 184, 0.22);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(148, 163, 184, 0);
+  }
+}
+
+.animate-highlight-fade-up {
+  animation: highlight-fade-up 1.5s ease-out forwards;
+}
+
+.animate-highlight-fade-down {
+  animation: highlight-fade-down 1.5s ease-out forwards;
+}
+
+.animate-highlight-fade-neutral {
+  animation: highlight-fade-neutral 1.5s ease-out forwards;
+}

@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { Input } from '@panwatch/base-ui/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@panwatch/base-ui/components/ui/select'
 import { Button } from '@panwatch/base-ui/components/ui/button'
+import { fetchAPI } from '@panwatch/api'
 
 export type RuleOp = 'and' | 'or'
-export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio'
+export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio' | 'nav_estimate' | 'nav_unit'
 export type ConditionOp = '>=' | '<=' | '>' | '<' | '==' | 'between'
 
 export interface AlertConditionItem {
@@ -64,6 +65,8 @@ const TYPE_LABEL: Record<ConditionType, string> = {
   turnover: '成交额',
   volume: '成交量',
   volume_ratio: '量比',
+  nav_estimate: '估值净值',
+  nav_unit: '单位净值',
 }
 
 const buildDefaultForm = (stockId = 0): PriceAlertFormState => ({
@@ -208,6 +211,87 @@ export default function PriceAlertFormDialog(props: {
       }
     })
   }
+
+  // 获取当前选中股票的 market 和 symbol
+  const selectedStock = useMemo(() => {
+    return stockOptions.find(s => s.id === form.stock_id) || null
+  }, [stockOptions, form.stock_id])
+  const selectedStockMarket = (selectedStock?.market || '').toUpperCase()
+  const selectedStockSymbol = selectedStock?.symbol || ''
+
+  // 基金行情状态（用于判断是否有估值）
+  const [fundQuote, setFundQuote] = useState<{ hasEstimate: boolean; loading: boolean }>({ hasEstimate: true, loading: false })
+
+  // 当选中基金时，获取行情判断是否有估值
+  const loadFundQuote = useCallback(async (symbol: string) => {
+    if (!symbol) return
+    setFundQuote({ hasEstimate: true, loading: true })
+    try {
+      const resp = await fetchAPI<{ has_estimate: boolean | null }>(
+        `/quotes/${encodeURIComponent(symbol)}?market=FUND`
+      )
+      // 使用后端返回的 has_estimate 字段
+      const hasEstimate = resp.has_estimate === true
+      setFundQuote({ hasEstimate, loading: false })
+    } catch {
+      setFundQuote({ hasEstimate: false, loading: false })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (selectedStockMarket === 'FUND' && selectedStockSymbol) {
+      loadFundQuote(selectedStockSymbol)
+    } else {
+      setFundQuote({ hasEstimate: true, loading: false })
+    }
+  }, [selectedStockMarket, selectedStockSymbol, loadFundQuote])
+
+  // 根据 market 和估值情况过滤可用的条件类型
+  const availableConditionTypes = useMemo(() => {
+    if (selectedStockMarket === 'FUND') {
+      if (fundQuote.hasEstimate) {
+        // 有估值：显示全部基金条件
+        return {
+          nav_estimate: '估值净值',
+          nav_unit: '单位净值',
+          change_pct: '估值涨跌幅%',
+        }
+      } else {
+        // 无估值：只显示单位净值
+        return {
+          nav_unit: '单位净值',
+        }
+      }
+    }
+    return TYPE_LABEL
+  }, [selectedStockMarket, fundQuote.hasEstimate])
+
+  // 基金提示文字
+  const fundHint = useMemo(() => {
+    if (selectedStockMarket !== 'FUND') return ''
+    if (fundQuote.loading) return '(加载中...)'
+    if (!fundQuote.hasEstimate) return '(该基金无实时估值)'
+    return ''
+  }, [selectedStockMarket, fundQuote])
+
+  // 当股票变化时，重置不支持的条件类型
+  useEffect(() => {
+    if (!selectedStockMarket) return
+    if (fundQuote.loading) return  // 等待加载完成
+    const validTypes = Object.keys(availableConditionTypes)
+    // 基金无估值时默认用 nav_unit，有估值时用 nav_estimate
+    const defaultType = selectedStockMarket === 'FUND'
+      ? (fundQuote.hasEstimate ? 'nav_estimate' : 'nav_unit')
+      : 'price'
+    setForm(prev => {
+      const hasInvalid = prev.items.some(it => !validTypes.includes(it.type))
+      if (!hasInvalid) return prev
+      return {
+        ...prev,
+        items: prev.items.map(it => validTypes.includes(it.type) ? it : { ...it, type: defaultType as ConditionType })
+      }
+    })
+  }, [selectedStockMarket, availableConditionTypes, fundQuote.loading, fundQuote.hasEstimate])
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -395,7 +479,10 @@ export default function PriceAlertFormDialog(props: {
 
           <div className="rounded-lg border border-border/40 p-3 space-y-2">
             <div className="flex items-center justify-between">
-              <div className="text-[12px] text-muted-foreground">条件列表</div>
+              <div className="text-[12px] text-muted-foreground">
+                条件列表
+                {fundHint && <span className="ml-1 text-amber-500 text-[10px]">{fundHint}</span>}
+              </div>
               <Button variant="secondary" size="sm" className="h-7 text-[11px]" onClick={addCond}>添加条件</Button>
             </div>
             {form.items.map((it, idx) => (
@@ -404,7 +491,7 @@ export default function PriceAlertFormDialog(props: {
                   <Select value={it.type} onValueChange={(v) => updateCond(idx, { type: v as ConditionType })}>
                     <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {Object.entries(TYPE_LABEL).map(([k, label]) => (
+                      {Object.entries(availableConditionTypes).map(([k, label]) => (
                         <SelectItem key={k} value={k}>{label}</SelectItem>
                       ))}
                     </SelectContent>

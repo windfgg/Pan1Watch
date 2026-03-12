@@ -1,6 +1,8 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@panwatch/base-ui/components/ui/dialog'
 import InteractiveKline from '@panwatch/biz-ui/components/InteractiveKline'
 
+type KlineInterval = '1d' | '1w' | '1m' | '1min' | '5min' | '15min' | '30min' | '60min'
+
 export default function KlineModal(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -8,7 +10,7 @@ export default function KlineModal(props: {
   market: string
   title?: string
   description?: string
-  initialInterval?: '1d' | '1w' | '1m'
+  initialInterval?: KlineInterval
   initialDays?: '60' | '120' | '250'
 }) {
   const symbol = String(props.symbol || '').trim()
@@ -20,7 +22,7 @@ export default function KlineModal(props: {
         <DialogHeader>
           <DialogTitle>{props.title || (symbol ? `K线：${symbol}` : 'K线')}</DialogTitle>
           <DialogDescription>
-            {props.description || '日K/周K/月K切换，含MA/成交量/MACD。'}
+            {props.description || '分钟K/日K/周K/月K切换，含MA/成交量/MACD。'}
           </DialogDescription>
         </DialogHeader>
         {symbol ? (

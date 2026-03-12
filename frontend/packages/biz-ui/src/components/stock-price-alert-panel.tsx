@@ -53,6 +53,8 @@ function conditionText(item: AlertConditionItem): string {
     turnover: '成交额',
     volume: '成交量',
     volume_ratio: '量比',
+    nav_estimate: '估值净值',
+    nav_unit: '单位净值',
   }
   if (item.op === 'between' && Array.isArray(item.value)) {
     return `${label[item.type] || item.type} ∈ [${item.value[0]}, ${item.value[1]}]`
