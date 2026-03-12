@@ -28,9 +28,17 @@ type GroupedSignal = {
 }
 
 const marketLabel = (m?: string) => {
+  if (m === 'FUND') return '基金'
   if (m === 'HK') return '港股'
   if (m === 'US') return '美股'
+  if (m === 'CN') return 'A股'
+  if (m) return m
   return 'A股'
+}
+
+const isStockMarket = (m?: string) => {
+  const market = String(m || '').toUpperCase()
+  return market === 'CN' || market === 'HK' || market === 'US'
 }
 
 const sourceAgentLabelMap: Record<string, string> = {
@@ -283,6 +291,7 @@ export default function OpportunitiesPage() {
     setLoading(true)
     setError('')
     try {
+      let nextError = ''
       const req = {
         status: 'active' as const,
         source_pool: source,
@@ -337,15 +346,23 @@ export default function OpportunitiesPage() {
           timeoutMs: 45000,
         })
         if (fallback.items && fallback.items.length > 0) {
-          setError(`当前${marketLabel(market)}暂无满足条件机会，已展示全市场结果`)
+          nextError = `当前${marketLabel(market)}暂无满足条件机会，已展示全市场结果`
           data = fallback
         }
       }
-      setItems(data.items || [])
-      setSnapshotDate(data.snapshot_date || '')
-      if (!data.snapshot_date) {
-        setError('暂无机会快照，请点击“刷新”生成一次')
+      const allItems = data.items || []
+      const filteredItems = allItems.filter((item) => isStockMarket(item.stock_market))
+      if (filteredItems.length < allItems.length) {
+        nextError = nextError
+          ? `${nextError}；机会页暂不纳入基金信号，已自动过滤`
+          : '机会页暂不纳入基金信号，已自动过滤'
       }
+      setItems(filteredItems)
+      setSnapshotDate(data.snapshot_date || '')
+      if (!data.snapshot_date && !nextError) {
+        nextError = '暂无机会快照，请点击“刷新”生成一次'
+      }
+      setError(nextError)
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败')
       setItems([])
@@ -699,6 +716,9 @@ export default function OpportunitiesPage() {
           <Button variant="ghost" size="sm" className="h-8 text-[12px]" onClick={resetFilters}>
             清空筛选
           </Button>
+        </div>
+        <div className="mt-2 text-[11px] text-muted-foreground">
+          当前机会页仅纳入股票信号（A股/港股/美股），基金信号已默认排除。
         </div>
         <div className="mt-2 flex items-center justify-end md:hidden">
           <div className="inline-flex items-center rounded-md border border-border/70 bg-background p-0.5">
