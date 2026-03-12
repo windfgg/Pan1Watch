@@ -1,253 +1,158 @@
-# 盯盘侠 PanWatch
+# Pan1Watch
 
-**私有部署的 AI 股票助手** — 实时行情监控、智能技术分析、多账户持仓管理
+私有部署的 AI 股票/基金助手，聚焦盯盘、分析、通知与执行建议。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+## 项目定位
+
+Pan1Watch 面向希望「数据不出本地」的投资者和量化交易爱好者，提供从行情监控到 AI 分析再到多渠道推送的一体化能力。
+
+- 数据私有：自托管部署，持仓与配置均落在你自己的环境
+- AI 原生：围绕持仓上下文进行分析，不是单纯指标罗列
+- MCP 原生：标准 JSON-RPC 接口，可直接接入支持 MCP 的客户端
+- 开箱即用：Docker 一条命令启动
+
+## 截图预览
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
-|                    持仓管理                    |                     AI 建议                      |
-| :--------------------------------------------: | :----------------------------------------------: |
-| ![Portfolio](./docs/screenshots/portfolio.png) | ![Suggestion](./docs/screenshots/suggestion.png) |
+| 股票详情                                         | 基金详情                                         | 移动端                                 |
+| ------------------------------------------------ | ------------------------------------------------ | -------------------------------------- |
+| ![Portfolio 1](docs/screenshots/portfolio-1.png) | ![Portfolio 2](docs/screenshots/portfolio-2.png) | ![Mobile](docs/screenshots/mobile.png) |
 
-<details>
-<summary>移动端截图</summary>
+## 功能概览
 
-<img src="./docs/screenshots/mobile.png" width="375" />
+### 智能 Agent 系统
 
-</details>
+| Agent    | 触发时机     | 功能                                       |
+| -------- | ------------ | ------------------------------------------ |
+| 盘前分析 | 每日开盘前   | 综合隔夜市场、新闻与技术形态，生成当日策略 |
+| 盘中监测 | 交易时段实时 | 监控异动与指标共振，触发提醒               |
+| 盘后日报 | 每日收盘后   | 复盘走势、分析资金流向、规划次日关注       |
+| 新闻速递 | 定时采集     | 抓取并筛选与持仓高度相关的财经信息         |
 
-## 为什么选择盯盘侠？
+### 专业技术分析
 
-- **数据私有** — 自托管部署，持仓数据不经过任何第三方
-- **AI 原生** — 不是简单的指标堆砌，而是让 AI 理解你的持仓、风格和目标
-- **MCP 原生** — 标准 JSON-RPC 接口，支持 Bearer/Basic 双认证，便于接入各类 MCP 客户端
-- **开箱即用** — Docker 一键部署，5 分钟完成配置
+- 趋势指标：MA、MACD、布林带
+- 动量指标：RSI、KDJ
+- 量价分析：量比、缩量回调、放量突破
+- K 线形态：锤子线、吞没形态、十字星等
+- 支撑压力：自动计算关键位
 
-## 核心功能
+### 多市场与多账户
 
-<details>
-<summary><b>智能 Agent 系统</b></summary>
+- 覆盖市场：A 股、港股、美股
+- 账户体系：多券商账户独立管理与资产汇总
+- 风格适配：短线、波段、长线策略差异化建议
 
-| Agent        | 触发时机     | 功能                                               |
-| ------------ | ------------ | -------------------------------------------------- |
-| **盘前分析** | 每日开盘前   | 综合隔夜美股、新闻消息、技术形态，给出今日操作策略 |
-| **盘中监测** | 交易时段实时 | 监控异动信号，RSI/KDJ/MACD 共振时推送提醒          |
-| **盘后日报** | 每日收盘后   | 复盘当日走势，分析资金流向，规划次日操作           |
-| **新闻速递** | 定时采集     | 抓取财经新闻，AI 筛选与持仓相关的重要信息          |
+### 通知与提醒
 
-</details>
-
-<details>
-<summary><b>专业技术分析</b></summary>
-
-- **趋势指标**：MA 多空排列、MACD 金叉死叉、布林带突破
-- **动量指标**：RSI 超买超卖、KDJ 钝化与背离
-- **量价分析**：量比异动、缩量回调、放量突破
-- **形态识别**：锤子线、吞没形态、十字星等 K 线形态
-- **支撑压力**：自动计算多级支撑位和压力位
-
-</details>
-
-<details>
-<summary><b>多市场 & 多账户</b></summary>
-
-- **覆盖市场**：A 股、港股、美股实时行情
-- **账户管理**：支持多券商账户独立管理，汇总展示总资产
-- **交易风格**：按短线/波段/长线分别设置，AI 建议更精准
-
-</details>
-
-<details>
-<summary><b>全渠道通知</b></summary>
-
-Telegram / 企业微信 / 钉钉 / 飞书 / Bark / 自定义 Webhook
-
-</details>
-
-<details>
-<summary><b>价格提醒</b></summary>
-
-- 支持价格、涨跌幅、成交额、量比等条件组合（AND / OR）
-- 支持交易时段/全天生效、冷却时间、日触发上限、重复触发模式
-- 到期时间使用弹窗内日期面板 + `HH:mm` 输入，留空表示永不过期
-- 可按规则选择通知渠道，不选则走系统默认渠道
-
-</details>
+- 通知渠道：Telegram、企业微信、钉钉、飞书、Bark、自定义 Webhook
+- 价格提醒：支持价格/涨跌幅/成交额/量比等条件组合
+- 策略控制：支持冷却时间、日触发上限、交易时段限制等
 
 ## 快速开始
 
+### Docker 一键启动
+
 ```bash
 docker run -d \
-  --name panwatch \
+  --name pan1watch \
   -p 8000:8000 \
-  -v panwatch_data:/app/data \
+  -v pan1watch_data:/app/data \
   ghcr.io/windfgg/pan1watch:latest
 ```
 
-访问 `http://localhost:8000`，首次使用设置账号密码即可。
+启动后访问 http://localhost:8000，首次进入按页面引导创建账号。
 
-说明：镜像内已包含 Playwright 运行所需的系统依赖；Chromium 浏览器会在容器首次启动时自动下载并安装到挂载卷（默认 `/app/data/playwright`），首次启动可能需要几分钟且需要网络可达。
+说明：镜像内已包含 Playwright 所需系统依赖；Chromium 会在首次启动时自动下载到 /app/data/playwright。
 
-如果不需要截图等浏览器能力，可以在启动容器时设置 `PLAYWRIGHT_SKIP_BROWSER_INSTALL=1` 跳过首次 Chromium 下载/安装。
+如果不需要截图能力，可设置环境变量跳过安装：
 
-<details>
-<summary>Docker Compose</summary>
+```bash
+PLAYWRIGHT_SKIP_BROWSER_INSTALL=1
+```
+
+### Docker Compose
 
 ```yaml
 version: '3.8'
 services:
-  panwatch:
+  pan1watch:
     image: ghcr.io/windfgg/pan1watch:latest
-    container_name: panwatch
+    container_name: pan1watch
     ports:
       - "8000:8000"
     volumes:
-      - panwatch_data:/app/data
+      - pan1watch_data:/app/data
     restart: unless-stopped
 
 volumes:
-  panwatch_data:
+  pan1watch_data:
 ```
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-</details>
+## 首次配置
 
-<details>
-<summary>环境变量</summary>
+1. 设置登录账号密码
+2. 在设置页配置 AI 服务商（OpenAI 兼容接口）
+3. 配置通知渠道（如 Telegram）
+4. 添加持仓与自选，启用对应 Agent
 
-| 变量名                            | 说明                                          | 默认值          |
-| --------------------------------- | --------------------------------------------- | --------------- |
-| `AUTH_USERNAME`                   | 预设登录用户名                                | 首次访问时设置  |
-| `AUTH_PASSWORD`                   | 预设登录密码                                  | 首次访问时设置  |
-| `JWT_SECRET`                      | JWT 签名密钥                                  | 自动生成        |
-| `DATA_DIR`                        | 数据存储目录                                  | `./data`        |
-| `TZ`                              | 应用时区（影响 Agent 调度触发时间与时间展示） | `Asia/Shanghai` |
-| `PLAYWRIGHT_SKIP_BROWSER_INSTALL` | 跳过首次 Chromium 安装（不需要截图时可用）    | 未设置          |
+## 环境变量
 
-</details>
+| 变量名                          | 说明                   | 默认值         |
+| ------------------------------- | ---------------------- | -------------- |
+| AUTH_USERNAME                   | 预设登录用户名         | 首次访问时设置 |
+| AUTH_PASSWORD                   | 预设登录密码           | 首次访问时设置 |
+| JWT_SECRET                      | JWT 签名密钥           | 自动生成       |
+| DATA_DIR                        | 数据存储目录           | ./data         |
+| TZ                              | 应用时区               | Asia/Shanghai  |
+| PLAYWRIGHT_SKIP_BROWSER_INSTALL | 跳过 Chromium 首次安装 | 未设置         |
 
-<details>
-<summary>首次配置</summary>
+## 本地开发
 
-1. 访问 Web 界面，设置登录账号
-2. **设置 → AI 服务商**：配置 OpenAI 兼容 API（支持 OpenAI / 智谱 / DeepSeek / Ollama 等）
-3. **设置 → 通知渠道**：添加 Telegram 或其他推送渠道
-4. **持仓 → 添加股票**：添加自选股，启用对应 Agent
-
-</details>
-
-<details>
-<summary>本地开发</summary>
-
-**环境要求**：Python 3.10+ / Node.js 18+ / pnpm
+环境要求：Python 3.10+、Node.js 18+、pnpm。
 
 ```bash
 # 后端
-python -m venv venv && source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python server.py
 
 # 前端（新终端）
-cd frontend && pnpm install && pnpm dev
+cd frontend
+pnpm install
+pnpm dev
 ```
 
-前端运行在 `http://localhost:5173`，自动代理 API 到后端。
-
-</details>
-
-<details>
-<summary><b>技术栈</b></summary>
-
-**后端**：FastAPI / SQLAlchemy / APScheduler / OpenAI SDK
-
-**前端**：React 18 / TypeScript / Tailwind CSS / shadcn/ui
-
-</details>
+前端默认运行在 http://localhost:5173，并代理到后端 API。
 
 ## MCP 接口
 
-PanWatch 提供标准 JSON-RPC over HTTP 的 MCP 接口：`/api/mcp`。
+Pan1Watch 提供标准 JSON-RPC over HTTP 的 MCP 接口：/api/mcp。
 
-- 认证方式：
-  - Bearer：复用 Web 登录 token（推荐）
-  - Basic：使用系统用户名和密码
-- 协议能力：`initialize`、`tools/list`、`tools/call`
-- 主要工具：持仓 CRUD、自选股查询、市场指数、Dashboard 概览、MCP 诊断工具
+- 认证方式：Bearer（推荐）或 Basic
+- 协议能力：initialize、tools/list、tools/call
+- 主要工具：持仓管理、市场数据查询、Dashboard 概览、诊断工具
 
-### MCP 客户端配置示例
 
-Bearer：
+## 发布说明
 
-```json
-{
-  "mcpServers": {
-    "panwatch": {
-      "url": "http://127.0.0.1:8000/api/mcp",
-      "headers": {
-        "Authorization": "Bearer <YOUR_TOKEN>"
-      }
-    }
-  }
-}
-```
+打 tag后会自动构建并推送镜像：
 
-Basic：
-
-```json
-{
-  "mcpServers": {
-    "panwatch": {
-      "url": "http://127.0.0.1:8000/api/mcp",
-      "headers": {
-        "Authorization": "Basic <base64(username:password)>"
-      }
-    }
-  }
-}
-```
-
-### JSON-RPC 调用示例
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <YOUR_TOKEN>' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <YOUR_TOKEN>' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"positions.list","arguments":{"page":1,"page_size":20}}}'
-```
-
-### 常见错误
-
-- `401 Unauthorized`：token 失效，或 Basic 用户名密码错误
-- JSON-RPC `-32602`：参数不合法（请按 `tools/list` 的 `inputSchema` 传参）
-- JSON-RPC `-32004`：工具名不存在
-
-<details>
-<summary><b>发布（Docker 镜像）</b></summary>
-
-本项目内置 GitHub Actions 发布流程：
-
-- 打 tag（例如 `0.2.3`）会自动构建并推送 Docker 镜像到 GitHub Container Registry
-  - `ghcr.io/windfgg/pan1watch:0.2.3`
-  - `ghcr.io/windfgg/pan1watch:latest`
-- 也支持在 GitHub Actions 里手动触发（workflow_dispatch）指定版本号
-- 使用内置 `GITHUB_TOKEN`，无需额外配置 Secrets
-
-</details>
+- ghcr.io/windfgg/pan1watch:<tag>
+- ghcr.io/windfgg/pan1watch:latest
 
 ## 贡献
 
-欢迎提交 Issue 和 PR！自定义 Agent 和数据源开发请参考 [贡献指南](CONTRIBUTING.md)。
+欢迎提交 Issue 和 PR。开发规范见 CONTRIBUTING.md。
 
 ## License
 
-[MIT](LICENSE)
+MIT
