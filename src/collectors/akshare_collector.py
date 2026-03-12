@@ -47,6 +47,9 @@ def _tencent_symbol(symbol: str, market: MarketCode = MarketCode.CN) -> str:
     if market == MarketCode.US:
         # 例如：AAPL（Apple）→ usAAPL，NVDA（NVIDIA）→ usNVDA
         return f"us{symbol}"
+    if market == MarketCode.FUND:
+        # 场内基金（ETF/LOF）按 A 股代码规则请求腾讯行情。
+        return get_cn_prefix(symbol) + symbol
     # CN 市场代码前缀映射（统一函数）
     return get_cn_prefix(symbol) + symbol
 
@@ -205,7 +208,7 @@ def _parse_fund_gz_line(raw: str) -> dict | None:
 
 def _fetch_fund_quotes(symbols: list[str]) -> list[dict]:
     """批量获取基金实时估值（天天基金）。
-    
+
     对于场外基金（没有实时估值），会回退到基金详情接口获取最新净值。
     """
     if not symbols:
@@ -248,7 +251,8 @@ def _fetch_fund_quotes(symbols: list[str]) -> list[dict]:
                     jzrq = ""
                     if ts:
                         from datetime import datetime
-                        jzrq = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                        jzrq = datetime.fromtimestamp(
+                            ts / 1000).strftime("%Y-%m-%d")
                     if nav is not None:
                         results.append({
                             "symbol": code,
@@ -303,7 +307,50 @@ class AkshareCollector(BaseCollector):
             return self._get_hk_stocks(symbols)
         elif self.market == MarketCode.US:
             return self._get_us_stocks(symbols)
+        elif self.market == MarketCode.FUND:
+            return self._get_fund_stocks(symbols)
         return []
+
+    def _get_fund_stocks(self, symbols: list[str]) -> list[StockData]:
+        try:
+            fund_items = _fetch_fund_quotes(symbols)
+        except Exception as e:
+            logger.error(f"获取基金行情失败: {e}")
+            fund_items = []
+
+        result = [
+            StockData(
+                symbol=item["symbol"],
+                name=item["name"],
+                market=MarketCode.FUND,
+                current_price=item["current_price"] or 0,
+                change_pct=item["change_pct"] or 0,
+                change_amount=item["change_amount"] or 0,
+                volume=item.get("volume") or 0,
+                turnover=item.get("amount") or item.get("turnover") or 0,
+                open_price=item.get(
+                    "open_price") or item["current_price"] or 0,
+                high_price=item.get(
+                    "high_price") or item["current_price"] or 0,
+                low_price=item.get("low_price") or item["current_price"] or 0,
+                prev_close=item.get(
+                    "prev_close") or item["current_price"] or 0,
+                timestamp=datetime.now(),
+            )
+            for item in fund_items
+            if item.get("current_price") is not None
+        ]
+
+        found_symbols = {i["symbol"] for i in fund_items if i.get("symbol")}
+        missing = [s for s in symbols if s not in found_symbols]
+        if missing:
+            # 部分场内基金可能在估值接口无数据，回退腾讯行情。
+            fallback = self._get_cn_stocks(missing)
+            for row in fallback:
+                row.market = MarketCode.FUND
+            result.extend(fallback)
+
+        return result
 
     def _get_cn_index(self) -> list[IndexData]:
         tencent_symbols = [

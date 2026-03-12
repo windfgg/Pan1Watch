@@ -736,7 +736,7 @@ export default function FundOverviewModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[92vw] max-w-6xl p-5 md:p-6 overflow-x-hidden">
+      <DialogContent className="w-[92vw] max-w-6xl p-5 md:p-6 overflow-hidden">
         <DialogHeader className="mb-3">
           <div className="flex items-start justify-between gap-3 pr-10 md:pr-8">
             <div className="shrink-0">

@@ -42,7 +42,9 @@ AGENT_LABELS = {
     "intraday_monitor": "盘中监测",
     "daily_report": "收盘复盘",
     "news_digest": "新闻速递",
+    "fund_holding_analyst": "基金分析",
 }
+
 
 def save_suggestion(
     stock_symbol: str,
@@ -110,7 +112,8 @@ def save_suggestion(
             if latest and latest.created_at:
                 latest_created = latest.created_at
                 if latest_created.tzinfo is None:
-                    latest_created = latest_created.replace(tzinfo=timezone.utc)
+                    latest_created = latest_created.replace(
+                        tzinfo=timezone.utc)
 
                 window = timedelta(minutes=_dedupe_window_minutes(agent_name))
                 same_key = (
@@ -125,6 +128,8 @@ def save_suggestion(
                         latest.expires_at = expires_at
                     if not (latest.stock_name or "") and stock_name:
                         latest.stock_name = stock_name
+                    if agent_label and (latest.agent_label or "") != agent_label:
+                        latest.agent_label = agent_label
                     db.commit()
                     logger.info(
                         f"建议去重: {stock_symbol} {action_label} (来源: {agent_label})"
@@ -154,6 +159,8 @@ def save_suggestion(
                             latest.expires_at = expires_at
                         if not (latest.stock_name or "") and stock_name:
                             latest.stock_name = stock_name
+                        if agent_label and (latest.agent_label or "") != agent_label:
+                            latest.agent_label = agent_label
                         db.commit()
                         logger.info(
                             f"建议稳定: {stock_symbol} 新建议降级({action_label})，保持上一条({latest.action_label})"
@@ -177,7 +184,8 @@ def save_suggestion(
             agent_name=agent_name,
             agent_label=agent_label,
             expires_at=expires_at,
-            prompt_context=prompt_context[:2000] if prompt_context else "",  # 限制长度
+            # 限制长度
+            prompt_context=prompt_context[:2000] if prompt_context else "",
             ai_response=ai_response[:2000] if ai_response else "",  # 限制长度
             meta=to_jsonable(meta or {}),
         )
@@ -214,10 +222,12 @@ def get_suggestions_for_stock(
     """
     db = SessionLocal()
     try:
-        query = db.query(StockSuggestion).filter(StockSuggestion.stock_symbol == stock_symbol)
+        query = db.query(StockSuggestion).filter(
+            StockSuggestion.stock_symbol == stock_symbol)
         if stock_market:
             query = query.filter(
-                StockSuggestion.stock_market == (stock_market or "CN").strip().upper()
+                StockSuggestion.stock_market == (
+                    stock_market or "CN").strip().upper()
             )
 
         now = utc_now()
@@ -228,7 +238,8 @@ def get_suggestions_for_stock(
             )
 
         suggestions = (
-            query.order_by(StockSuggestion.created_at.desc()).limit(limit).all()
+            query.order_by(StockSuggestion.created_at.desc()
+                           ).limit(limit).all()
         )
 
         return [_to_dict(s, now) for s in suggestions]
@@ -295,7 +306,8 @@ def get_latest_suggestions(
             else:
                 return {}
         elif stock_symbols:
-            query = query.filter(StockSuggestion.stock_symbol.in_(stock_symbols))
+            query = query.filter(
+                StockSuggestion.stock_symbol.in_(stock_symbols))
 
         now = utc_now()
         if not include_expired:
