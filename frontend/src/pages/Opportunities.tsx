@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, RefreshCw, Sparkles } from 'lucide-react'
+import { AlertTriangle, ChevronRight, LayoutGrid, List, RefreshCw, Sparkles } from 'lucide-react'
 import {
   recommendationsApi,
   stocksApi,
@@ -235,6 +235,7 @@ export default function OpportunitiesPage() {
   const [risk, setRisk] = useLocalStorage<RiskFilter>('panwatch_opportunities_risk_v3', DEFAULT_FILTERS.risk)
   const [minScore, setMinScore] = useLocalStorage('panwatch_opportunities_min_score_v3', DEFAULT_FILTERS.minScore)
   const [snapshotDate, setSnapshotDate] = useState('')
+  const [viewMode, setViewMode] = useLocalStorage<'card' | 'list'>('panwatch_opportunities_view_v1', 'card')
 
   const [insightOpen, setInsightOpen] = useState(false)
   const [insightSymbol, setInsightSymbol] = useState('')
@@ -527,6 +528,22 @@ export default function OpportunitiesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden md:inline-flex items-center rounded-md border border-border/70 bg-background p-0.5">
+            <button
+              type="button"
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] transition-colors ${viewMode === 'card' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setViewMode('card')}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" /> 卡片
+            </button>
+            <button
+              type="button"
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] transition-colors ${viewMode === 'list' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setViewMode('list')}
+            >
+              <List className="w-3.5 h-3.5" /> 列表
+            </button>
+          </div>
           <span className="text-[11px] text-muted-foreground">{snapshotDate || '最新快照'}</span>
           <Button
             variant="secondary"
@@ -683,6 +700,24 @@ export default function OpportunitiesPage() {
             清空筛选
           </Button>
         </div>
+        <div className="mt-2 flex items-center justify-end md:hidden">
+          <div className="inline-flex items-center rounded-md border border-border/70 bg-background p-0.5">
+            <button
+              type="button"
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] transition-colors ${viewMode === 'card' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setViewMode('card')}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" /> 卡片
+            </button>
+            <button
+              type="button"
+              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] transition-colors ${viewMode === 'list' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setViewMode('list')}
+            >
+              <List className="w-3.5 h-3.5" /> 列表
+            </button>
+          </div>
+        </div>
       </div>
 
       {error && (
@@ -692,7 +727,7 @@ export default function OpportunitiesPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className={`grid grid-cols-1 ${viewMode === 'card' ? 'md:grid-cols-2' : 'md:grid-cols-1'} gap-3`}>
         {groupedItems.map((group) => {
           const item = group.primary
           const payload = item.payload && typeof item.payload === 'object' ? item.payload as Record<string, unknown> : {}
@@ -721,6 +756,34 @@ export default function OpportunitiesPage() {
           const sourcePoolLabel = group.hasMarketScan
             ? (group.members.some((x) => x.source_pool === 'mixed') ? '市场+关注' : '市场池')
             : (item.source_pool_label || '关注池')
+          if (viewMode === 'list') {
+            return (
+              <div key={stateKey} className="card p-0 overflow-hidden border-border/70 hover:border-primary/40 transition-colors">
+                <button className="w-full text-left" onClick={() => openInsight(item)}>
+                  <div className="flex items-center gap-3 px-3 py-3 md:px-4">
+                    <div className="min-w-0 w-[150px] md:w-[190px]">
+                      <div className="text-[13px] md:text-[14px] font-semibold truncate">{item.stock_name || item.stock_symbol}</div>
+                      <div className="text-[11px] text-muted-foreground font-mono truncate">{item.stock_market}:{item.stock_symbol}</div>
+                    </div>
+                    <div className="hidden md:flex items-center gap-1.5 w-[120px]">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] ${actionBadgeClass(item.action)}`}>
+                        {displayActionLabel(item)}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">{Math.round(item.rank_score || item.score || 0)}分</span>
+                    </div>
+                    <div className="min-w-0 flex-1 text-[12px] text-muted-foreground truncate">
+                      {item.signal || item.reason || '--'}
+                    </div>
+                    <div className="hidden lg:block text-[11px] text-muted-foreground w-[148px] text-right">
+                      入场 {formatEntryDisplay(item.action, entryLow, entryHigh)}
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-muted-foreground/60 flex-shrink-0" />
+                  </div>
+                </button>
+              </div>
+            )
+          }
+
           return (
             <div key={stateKey} className={`card p-4 transition-colors ${toneClass(item)}`}>
               <button className="w-full text-left" onClick={() => openInsight(item)}>
