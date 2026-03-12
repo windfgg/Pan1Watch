@@ -3,8 +3,6 @@
 **私有部署的 AI 股票助手** — 实时行情监控、智能技术分析、多账户持仓管理
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://hub.docker.com/r/sunxiao0721/panwatch)
-
 ![Dashboard](docs/screenshots/dashboard.png)
 
 |                    持仓管理                    |                     AI 建议                      |
@@ -83,7 +81,7 @@ docker run -d \
   --name panwatch \
   -p 8000:8000 \
   -v panwatch_data:/app/data \
-  sunxiao0721/panwatch:latest
+  ghcr.io/windfgg/pan1watch:latest
 ```
 
 访问 `http://localhost:8000`，首次使用设置账号密码即可。
@@ -99,7 +97,7 @@ docker run -d \
 version: '3.8'
 services:
   panwatch:
-    image: sunxiao0721/panwatch:latest
+    image: ghcr.io/windfgg/pan1watch:latest
     container_name: panwatch
     ports:
       - "8000:8000"
@@ -238,30 +236,17 @@ curl -X POST http://127.0.0.1:8000/api/mcp \
 
 本项目内置 GitHub Actions 发布流程：
 
-- 打 tag（例如 `0.2.3`）会自动构建并推送 Docker 镜像
-  - `sunxiao0721/panwatch:0.2.3`
-  - `sunxiao0721/panwatch:latest`
+- 打 tag（例如 `0.2.3`）会自动构建并推送 Docker 镜像到 GitHub Container Registry
+  - `ghcr.io/windfgg/pan1watch:0.2.3`
+  - `ghcr.io/windfgg/pan1watch:latest`
 - 也支持在 GitHub Actions 里手动触发（workflow_dispatch）指定版本号
-
-需要在仓库 Secrets 中配置：
-
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
+- 使用内置 `GITHUB_TOKEN`，无需额外配置 Secrets
 
 </details>
-
-## 捐赠支持
-
-如果你觉得 PanWatch 有帮助，欢迎请作者喝杯咖啡：
-
-|                      微信赞赏                      |                       支付宝                       |
-| :------------------------------------------------: | :------------------------------------------------: |
-| <img src="./docs/donate/wechat.png" width="240" /> | <img src="./docs/donate/alipay.png" width="240" /> |
 
 ## 贡献
 
 欢迎提交 Issue 和 PR！自定义 Agent 和数据源开发请参考 [贡献指南](CONTRIBUTING.md)。
-社区交流（Telegram）：[t.me/panwatch](https://t.me/panwatch)
 
 ## License
 
