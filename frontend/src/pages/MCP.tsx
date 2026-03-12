@@ -384,6 +384,9 @@ export default function MCPPage() {
             <Button variant="outline" className="w-full justify-start" onClick={() => handleQuickCall('agents.health', {})} disabled={loading}>
               Agent 健康状态
             </Button>
+            <Button variant="outline" className="w-full justify-start" onClick={() => handleQuickCall('mcp.logs.query', { limit: 20 })} disabled={loading}>
+              MCP审计日志
+            </Button>
             <Button variant="outline" className="w-full justify-start" onClick={() => handleQuickCall('price_alerts.list', {})} disabled={loading}>
               价格提醒列表
             </Button>

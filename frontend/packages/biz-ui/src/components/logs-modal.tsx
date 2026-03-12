@@ -79,17 +79,22 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadedOnce, setLoadedOnce] = useState(false)
   const [query, setQuery] = useState('')
+  const [queryInput, setQueryInput] = useState('')
   const [selectedLevels, setSelectedLevels] = useState<string[]>([])
   const [timeRange, setTimeRange] = useState(0)
   const [selectedLoggers, setSelectedLoggers] = useState<string[]>([])
   const [selectedFlow, setSelectedFlow] = useState('')
+  const [mcpOnly, setMcpOnly] = useState(false)
+  const [mcpTool, setMcpTool] = useState('')
+  const [mcpToolInput, setMcpToolInput] = useState('')
+  const [mcpStatus, setMcpStatus] = useState('')
+  const [mcpStatusInput, setMcpStatusInput] = useState('')
   const [domain, setDomain] = useLocalStorage<'business' | 'all' | 'infra'>('panwatch_logs_modal_domain', 'business')
   const [autoRefresh, setAutoRefresh] = useLocalStorage('panwatch_logs_modal_autoRefresh', false)
   const [showAllLoggerFilters, setShowAllLoggerFilters] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const [beforeId, setBeforeId] = useState<number>(0)
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
-  const searchTimer = useRef<ReturnType<typeof setTimeout>>()
   const limit = 200
 
   const loggerPreset = useMemo(
@@ -113,6 +118,9 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
       if (effectiveLoggers.length > 0) params.set('logger', effectiveLoggers.join(','))
       if (query) params.set('q', query)
       if (domain !== 'all') params.set('domain', domain)
+      if (mcpOnly) params.set('mcp_only', 'true')
+      if (mcpTool) params.set('mcp_tool', mcpTool)
+      if (mcpStatus) params.set('mcp_status', mcpStatus)
       if (timeRange > 0) {
         const since = new Date(Date.now() - timeRange * 3600 * 1000).toISOString()
         params.set('since', since)
@@ -141,21 +149,27 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
       if (append) setLoadingMore(false)
       else setLoading(false)
     }
-  }, [selectedLevels, effectiveLoggers, query, timeRange, domain])
+  }, [selectedLevels, effectiveLoggers, query, timeRange, domain, mcpOnly, mcpTool, mcpStatus])
 
   const loadLatest = useCallback(() => {
     setBeforeId(0)
     void load({ append: false, cursor: 0 })
   }, [load])
 
-  // 初次打开或筛选变更时刷新（关键词搜索走防抖）
+  // 初次打开或筛选变更时刷新
   useEffect(() => {
     if (!open) return
     loadLatest()
-    // query 由 handleSearchInput 防抖触发，避免每次键入都立即请求。
-  }, [open, selectedLevels, selectedLoggers, selectedFlow, domain, timeRange])
+  }, [open, query, selectedLevels, selectedLoggers, selectedFlow, domain, timeRange, mcpOnly, mcpTool, mcpStatus])
 
   // 自动刷新（仅刷新最新页）
+  useEffect(() => {
+    if (!open) return
+    setQueryInput(query)
+    setMcpToolInput(mcpTool)
+    setMcpStatusInput(mcpStatus)
+  }, [open, query, mcpTool, mcpStatus])
+
   useEffect(() => {
     if (open && autoRefresh) {
       refreshTimer.current = setInterval(() => loadLatest(), 3000)
@@ -163,17 +177,17 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
     return () => { if (refreshTimer.current) clearInterval(refreshTimer.current) }
   }, [open, autoRefresh, loadLatest])
 
-  const handleSearchInput = (value: string) => {
-    setQuery(value)
-    clearTimeout(searchTimer.current)
-    searchTimer.current = setTimeout(() => loadLatest(), 300)
-  }
-
-  useEffect(() => {
-    return () => {
-      if (searchTimer.current) clearTimeout(searchTimer.current)
+  const applyTextFilters = () => {
+    const nextQuery = queryInput.trim()
+    const nextMcpTool = mcpToolInput.trim()
+    const nextMcpStatus = mcpStatusInput.trim()
+    setQuery(nextQuery)
+    setMcpTool(nextMcpTool)
+    setMcpStatus(nextMcpStatus)
+    if ((nextMcpTool || nextMcpStatus) && !mcpOnly) {
+      setMcpOnly(true)
     }
-  }, [])
+  }
 
   const toggleLevel = (level: string) => {
     setSelectedLevels(prev => prev.includes(level) ? prev.filter(l => l !== level) : [...prev, level])
@@ -188,8 +202,14 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
     setTimeRange(0)
     setSelectedLoggers([])
     setSelectedFlow('')
+    setMcpOnly(false)
+    setMcpTool('')
+    setMcpStatus('')
+    setMcpToolInput('')
+    setMcpStatusInput('')
     setDomain('business')
     setQuery('')
+    setQueryInput('')
   }
 
   const handleClear = async () => {
@@ -223,10 +243,24 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
       if (flow) parts.push(`链路:${flow.label}`)
     }
     if (selectedLoggers.length) parts.push(`自选Logger:${selectedLoggers.length}`)
+    if (mcpOnly) parts.push('MCP审计:开启')
+    if (mcpTool) parts.push(`MCP工具:${mcpTool}`)
+    if (mcpStatus) parts.push(`MCP状态:${mcpStatus}`)
     return parts.length > 0 ? parts.join(' | ') : '当前无额外过滤'
-  }, [query, selectedLevels, timeRange, domain, selectedFlow, selectedLoggers])
+  }, [query, selectedLevels, timeRange, domain, selectedFlow, selectedLoggers, mcpOnly, mcpTool, mcpStatus])
 
   const loggerFilterOptions = loggerOptions()
+  const hasPendingTextFilters = queryInput.trim() !== query || mcpToolInput.trim() !== mcpTool || mcpStatusInput.trim() !== mcpStatus
+  const activeFilterCount =
+    (query ? 1 : 0)
+    + (selectedLevels.length ? 1 : 0)
+    + (timeRange > 0 ? 1 : 0)
+    + (domain !== 'all' ? 1 : 0)
+    + (selectedFlow ? 1 : 0)
+    + (selectedLoggers.length ? 1 : 0)
+    + (mcpOnly ? 1 : 0)
+    + (mcpTool ? 1 : 0)
+    + (mcpStatus ? 1 : 0)
 
   return (
     <>
@@ -251,7 +285,24 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
         <div className="card p-3 md:p-4 mb-3 space-y-3">
           <div className="relative">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground/50" />
-            <Input value={query} onChange={e => handleSearchInput(e.target.value)} placeholder="搜索日志内容 / trace_id / logger..." className="pl-10" />
+            <Input
+              value={queryInput}
+              onChange={e => setQueryInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') applyTextFilters()
+              }}
+              placeholder="搜索日志内容 / trace_id / logger..."
+              className="pl-10 pr-28"
+            />
+            <Button
+              variant={hasPendingTextFilters ? 'default' : 'secondary'}
+              size="sm"
+              className="h-7 absolute right-1 top-1/2 -translate-y-1/2"
+              onClick={applyTextFilters}
+              disabled={!hasPendingTextFilters}
+            >
+              应用
+            </Button>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -275,6 +326,55 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
               </button>
             ))}
             <span className="ml-auto text-[11px] text-muted-foreground font-medium">{total} 条记录</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-muted-foreground">已生效筛选 {activeFilterCount} 项</span>
+            {query && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => { setQuery(''); setQueryInput('') }}>
+                关键词: {query} ×
+              </button>
+            )}
+            {selectedLevels.length > 0 && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => setSelectedLevels([])}>
+                级别: {selectedLevels.join(',')} ×
+              </button>
+            )}
+            {timeRange > 0 && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => setTimeRange(0)}>
+                时间: {timeRange}h ×
+              </button>
+            )}
+            {domain !== 'all' && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => setDomain('all')}>
+                范围: {domain === 'business' ? '业务优先' : '基础设施'} ×
+              </button>
+            )}
+            {selectedFlow && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => setSelectedFlow('')}>
+                链路: {FLOW_PRESETS.find(x => x.key === selectedFlow)?.label || selectedFlow} ×
+              </button>
+            )}
+            {selectedLoggers.length > 0 && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => setSelectedLoggers([])}>
+                自选Logger: {selectedLoggers.length} ×
+              </button>
+            )}
+            {mcpOnly && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => setMcpOnly(false)}>
+                MCP审计 ×
+              </button>
+            )}
+            {mcpTool && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => { setMcpTool(''); setMcpToolInput('') }}>
+                MCP工具: {mcpTool} ×
+              </button>
+            )}
+            {mcpStatus && (
+              <button className="px-2 py-1 rounded-md bg-accent text-[11px]" onClick={() => { setMcpStatus(''); setMcpStatusInput('') }}>
+                MCP状态: {mcpStatus} ×
+              </button>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -311,6 +411,34 @@ export default function LogsModal({ open, onOpenChange }: { open: boolean, onOpe
               <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showAllLoggerFilters ? 'rotate-180' : ''}`} />
             </button>
             <div className="text-[11px] text-muted-foreground">默认链路会自动包含 `src.agents.base` 决策日志</div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setMcpOnly(v => !v)}
+              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${mcpOnly ? 'bg-primary text-white' : 'bg-accent text-muted-foreground hover:text-foreground'}`}
+            >
+              MCP审计
+            </button>
+            <Input
+              value={mcpToolInput}
+              onChange={e => setMcpToolInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') applyTextFilters()
+              }}
+              placeholder="MCP工具名，如 positions.create"
+              className="h-8 text-[11px] w-[240px]"
+            />
+            <Input
+              value={mcpStatusInput}
+              onChange={e => setMcpStatusInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') applyTextFilters()
+              }}
+              placeholder="MCP状态，如 success 或 error:MCP_RESOURCE_CONFLICT"
+              className="h-8 text-[11px] w-[320px]"
+            />
+            <Button variant={hasPendingTextFilters ? 'default' : 'secondary'} size="sm" className="h-8 text-[11px]" onClick={applyTextFilters} disabled={!hasPendingTextFilters}>应用MCP筛选</Button>
           </div>
           {showAllLoggerFilters && (
             <div className="flex flex-wrap items-center gap-1.5">

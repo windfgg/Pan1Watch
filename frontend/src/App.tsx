@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, useLocation, Navigate } from 'react-router-dom'
-import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Plug, RefreshCw, Newspaper } from 'lucide-react'
+import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, LayoutDashboard, LogOut, BellRing, MoreHorizontal, Sparkles, Plug, RefreshCw, Newspaper } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
 import { RefreshProvider, useRefresh } from '@/hooks/use-global-refresh'
 import { appApi, fetchAPI, isAuthenticated, logout } from '@panwatch/api'
@@ -133,7 +133,6 @@ function App() {
   const checkedUpdateRef = useRef(false)
   const desktopMoreRef = useRef<HTMLDivElement | null>(null)
   const mobileMoreRef = useRef<HTMLDivElement | null>(null)
-  const repoUrl = 'https://github.com/TNT-Likely/PanWatch'
 
   useEffect(() => {
     appApi.version()
@@ -277,13 +276,6 @@ function App() {
             <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
               {(location.pathname === '/' || location.pathname === '/portfolio') && <RefreshButton />}
               <button
-                onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
-                className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
-                title="GitHub 项目"
-              >
-                <Github className="w-4 h-4" />
-              </button>
-              <button
                 onClick={() => setLogsOpen(true)}
                 className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
                 title="查看日志"
@@ -325,13 +317,6 @@ function App() {
             </NavLink>
             <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
               {(location.pathname === '/' || location.pathname === '/portfolio') && <RefreshButton size="sm" />}
-              <button
-                onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
-                className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
-                title="GitHub 项目"
-              >
-                <Github className="w-4 h-4" />
-              </button>
               <button
                 onClick={() => setLogsOpen(true)}
                 className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"

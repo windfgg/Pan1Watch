@@ -25,6 +25,7 @@ export const LOGGER_MAPPING: Record<string, string> = {
 
   // Web/API
   'src.web.api': 'API',
+  'src.web.api.mcp': 'MCP接口',
   'src.web.app': 'Web应用',
   'src.web.database': '数据库',
   'src.web.stock_list': '股票列表',
