@@ -4,7 +4,7 @@ import { Copy, Download, ExternalLink, RefreshCw, Share2 } from 'lucide-react'
 import { insightApi, stocksApi } from '@panwatch/api'
 import { getMarketBadge } from '@panwatch/biz-ui'
 import { useLocalStorage } from '@/lib/utils'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@panwatch/base-ui/components/ui/select'
 import { Switch } from '@panwatch/base-ui/components/ui/switch'
@@ -350,6 +350,11 @@ export default function StockInsightModal(props: {
     'stock_insight_auto_refresh_sec',
     20
   )
+  const [autoRefreshProgress, setAutoRefreshProgress] = useState(0)
+  const [klineRefreshTrigger, setKlineRefreshTrigger] = useState(0)
+  const [overviewHighlightKey, setOverviewHighlightKey] = useState(0)
+  const [overviewHighlightUp, setOverviewHighlightUp] = useState<boolean | null>(null)
+  const prevQuoteRef = useRef<{ current_price: number | null; change_pct: number | null } | null>(null)
   const [quote, setQuote] = useState<QuoteResponse | null>(null)
   const [klineSummary, setKlineSummary] = useState<KlineSummary | null>(null)
   const [miniKlines, setMiniKlines] = useState<MiniKlineResponse['klines']>([])
@@ -745,14 +750,36 @@ export default function StockInsightModal(props: {
   }, [props.open, symbol, loadReports])
 
   useEffect(() => {
-    if (!props.open || !symbol || !autoRefreshEnabled) return
+    if (!props.open || !symbol || !autoRefreshEnabled) {
+      setAutoRefreshProgress(0)
+      return
+    }
     const sec = Number(autoRefreshSec) > 0 ? Number(autoRefreshSec) : 20
     const ms = Math.max(10, sec) * 1000
-    const timer = setInterval(() => {
+    const startTime = Date.now()
+    // 刷新定时器
+    const refreshTimer = setInterval(() => {
       refreshForAuto().catch(() => undefined)
+      // 如果在 K线 tab，触发 InteractiveKline 刷新
+      if (tab === 'kline') {
+        setKlineRefreshTrigger(prev => prev + 1)
+      }
     }, ms)
-    return () => clearInterval(timer)
-  }, [props.open, symbol, autoRefreshEnabled, autoRefreshSec, refreshForAuto])
+    // 进度更新定时器
+    const tick = () => {
+      const elapsed = Date.now() - startTime
+      const cycleElapsed = elapsed % ms
+      const progress = 1 - cycleElapsed / ms
+      setAutoRefreshProgress(progress)
+    }
+    tick()
+    const progressTimer = setInterval(tick, 100)
+    return () => {
+      clearInterval(refreshTimer)
+      clearInterval(progressTimer)
+      setAutoRefreshProgress(0)
+    }
+  }, [props.open, symbol, autoRefreshEnabled, autoRefreshSec, refreshForAuto, tab])
 
   const hasHolding = !!props.hasPosition || !!holdingAgg
   const technicalScored = useMemo(() => {
@@ -783,6 +810,32 @@ export default function StockInsightModal(props: {
   const quoteDown = (quote?.change_pct || 0) < 0
   const changeColor = quoteUp ? 'text-rose-500' : quoteDown ? 'text-emerald-500' : 'text-foreground'
   const priceColor = quoteUp ? 'text-rose-500' : quoteDown ? 'text-emerald-500' : 'text-foreground'
+
+  // 检测 quote 变化，触发概览高亮
+  useEffect(() => {
+    if (!quote) return
+    const current = {
+      current_price: quote.current_price ?? null,
+      change_pct: quote.change_pct ?? null,
+    }
+    const prev = prevQuoteRef.current
+    if (prev) {
+      const prevPrice = prev.current_price ?? 0
+      const currPrice = current.current_price ?? 0
+      const delta = currPrice - prevPrice
+      setOverviewHighlightUp(delta > 0 ? true : delta < 0 ? false : null)
+      setOverviewHighlightKey(k => k + 1)
+    }
+    prevQuoteRef.current = current
+  }, [quote])
+
+  const overviewHighlightClass = overviewHighlightKey > 0
+    ? overviewHighlightUp === true
+      ? 'animate-highlight-fade-up'
+      : overviewHighlightUp === false
+        ? 'animate-highlight-fade-down'
+        : 'animate-highlight-fade-neutral'
+    : ''
   const levelColor = (value: number | null | undefined) => {
     if (value == null || quote?.prev_close == null) return 'text-foreground'
     if (value > quote.prev_close) return 'text-rose-500'
@@ -1201,7 +1254,7 @@ export default function StockInsightModal(props: {
                   <span className="break-all">{resolvedName}</span>
                   <span className="font-mono text-[12px] text-muted-foreground">({symbol})</span>
                 </DialogTitle>
-                <DialogDescription className="hidden md:block">概览、K线、AI建议、新闻、历史分析都在同一弹窗查看</DialogDescription>
+              
               </div>
               <div className="hidden md:flex items-center gap-2">
                 <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={() => handleExportShareImage()} disabled={imageExporting}>
@@ -1230,9 +1283,6 @@ export default function StockInsightModal(props: {
                 <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={handleSetAlert} disabled={alerting}>
                   {alerting ? '设置中...' : '一键设提醒'}
                 </Button>
-                <Button variant="outline" size="sm" className="h-8 px-2.5" onClick={() => handleRefreshAll()} disabled={loading}>
-                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-                </Button>
               </div>
             </div>
             <div className="flex md:hidden items-center gap-2 mt-2 overflow-x-auto scrollbar-none pb-1 -mb-1">
@@ -1257,9 +1307,6 @@ export default function StockInsightModal(props: {
               <StockPriceAlertPanel mode="inline" symbol={symbol} market={market} stockName={resolvedName} />
               <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={handleSetAlert} disabled={alerting}>
                 {alerting ? '设置中...' : '一键设提醒'}
-              </Button>
-              <Button variant="outline" size="sm" className="h-8 px-2.5 shrink-0" onClick={() => handleRefreshAll()} disabled={loading}>
-                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               </Button>
             </div>
           </DialogHeader>
@@ -1286,23 +1333,76 @@ export default function StockInsightModal(props: {
               ))}
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-[11px] text-muted-foreground">自动刷新</span>
+              {/* 移动端：刷新按钮在最前面 */}
+              <button
+                onClick={() => handleRefreshAll()}
+                disabled={loading}
+                className="flex md:hidden w-8 h-8 rounded-xl items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all disabled:opacity-50 relative"
+                title="刷新"
+              >
+                {autoRefreshEnabled && !loading && (
+                  <svg
+                    className="absolute inset-0 -rotate-90 pointer-events-none"
+                    width={28}
+                    height={28}
+                    style={{ margin: 'auto' }}
+                  >
+                    <circle cx={14} cy={14} r={13} fill="none" stroke="currentColor" strokeOpacity={0.15} strokeWidth={2} />
+                    <circle
+                      cx={14} cy={14} r={13} fill="none" stroke="hsl(var(--primary))" strokeWidth={2} strokeLinecap="round"
+                      strokeDasharray={2 * Math.PI * 13}
+                      strokeDashoffset={2 * Math.PI * 13 * (1 - autoRefreshProgress)}
+                      style={{ transition: 'stroke-dashoffset 0.1s linear' }}
+                    />
+                  </svg>
+                )}
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              </button>
               <Switch
                 checked={autoRefreshEnabled}
                 onCheckedChange={setAutoRefreshEnabled}
                 aria-label="自动刷新"
+                className="scale-90"
               />
-              <Select value={String(autoRefreshSec)} onValueChange={(v) => setAutoRefreshSec(Number(v))}>
-                <SelectTrigger className="h-7 w-[84px] text-[11px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10秒</SelectItem>
-                  <SelectItem value="20">20秒</SelectItem>
-                  <SelectItem value="30">30秒</SelectItem>
-                  <SelectItem value="60">60秒</SelectItem>
-                </SelectContent>
-              </Select>
+              <span className="text-[11px] text-muted-foreground">自动刷新</span>
+              {autoRefreshEnabled && (
+                <Select value={String(autoRefreshSec)} onValueChange={(v) => setAutoRefreshSec(Number(v))}>
+                  <SelectTrigger className="h-6 w-14 text-[10px] px-1.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10秒</SelectItem>
+                    <SelectItem value="20">20秒</SelectItem>
+                    <SelectItem value="30">30秒</SelectItem>
+                    <SelectItem value="60">60秒</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+              {/* 桌面端：刷新按钮在最后面 */}
+              <button
+                onClick={() => handleRefreshAll()}
+                disabled={loading}
+                className="hidden md:flex w-8 h-8 rounded-xl items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all disabled:opacity-50 relative"
+                title="刷新"
+              >
+                {autoRefreshEnabled && !loading && (
+                  <svg
+                    className="absolute inset-0 -rotate-90 pointer-events-none"
+                    width={28}
+                    height={28}
+                    style={{ margin: 'auto' }}
+                  >
+                    <circle cx={14} cy={14} r={13} fill="none" stroke="currentColor" strokeOpacity={0.15} strokeWidth={2} />
+                    <circle
+                      cx={14} cy={14} r={13} fill="none" stroke="hsl(var(--primary))" strokeWidth={2} strokeLinecap="round"
+                      strokeDasharray={2 * Math.PI * 13}
+                      strokeDashoffset={2 * Math.PI * 13 * (1 - autoRefreshProgress)}
+                      style={{ transition: 'stroke-dashoffset 0.1s linear' }}
+                    />
+                  </svg>
+                )}
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              </button>
             </div>
           </div>
 
@@ -1312,10 +1412,10 @@ export default function StockInsightModal(props: {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
                   <div className="card p-4 h-full">
                     <div className="mt-1 flex items-end justify-between gap-3">
-                      <div className={`text-[34px] leading-none font-bold font-mono ${priceColor}`}>
+                      <div key={`overview-price-${overviewHighlightKey}`} className={`text-[34px] leading-none font-bold font-mono ${priceColor} ${overviewHighlightClass}`}>
                         {quote?.current_price != null ? formatNumber(quote.current_price) : '--'}
                       </div>
-                      <div className={`text-[16px] font-mono ${changeColor}`}>
+                      <div key={`overview-change-${overviewHighlightKey}`} className={`text-[16px] font-mono ${changeColor} ${overviewHighlightClass}`}>
                         {quote?.change_pct != null ? `${quote.change_pct >= 0 ? '+' : ''}${quote.change_pct.toFixed(2)}%` : '--'}
                       </div>
                     </div>
@@ -1543,6 +1643,8 @@ export default function StockInsightModal(props: {
                   symbol={symbol}
                   market={market}
                   initialInterval={klineInterval}
+                  hideRefreshButton
+                  refreshTrigger={klineRefreshTrigger}
                 />
               </div>
             )}

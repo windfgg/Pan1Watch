@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, ExternalLink, BarChart3 } from 'lucide-react'
+import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, ExternalLink, BarChart3, LayoutGrid, List } from 'lucide-react'
 import { fetchAPI, stocksApi, type AIService, type NotifyChannel } from '@panwatch/api'
 import { useLocalStorage } from '@/lib/utils'
+import { useRefreshReceiver, useAutoRefreshProgress } from '@/hooks/use-global-refresh'
 import { SuggestionBadge, type SuggestionInfo, type KlineSummary } from '@panwatch/biz-ui/components/suggestion-badge'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
 import { KlineSummaryDialog } from '@panwatch/biz-ui/components/kline-summary-dialog'
@@ -16,6 +17,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectL
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import StockInsightModal from '@panwatch/biz-ui/components/stock-insight-modal'
 import StockPriceAlertPanel from '@panwatch/biz-ui/components/stock-price-alert-panel'
+import FundOverviewModal from '@/components/FundOverviewModal'
 
 interface AgentResult {
   success?: boolean
@@ -107,6 +109,7 @@ interface AgentConfig {
   enabled: boolean
   schedule: string
   execution_mode: string  // batch: 批量分析, single: 逐只分析
+  market_filter?: string[]  // 空数组表示无限制，["FUND"]表示仅基金可用
 }
 
 interface SchedulePreview {
@@ -119,6 +122,12 @@ interface SearchResult {
   symbol: string
   name: string
   market: string
+}
+
+interface RefreshListResult {
+  count: number
+  stock_count?: number
+  fund_count?: number
 }
 
 interface QuoteRequestItem {
@@ -323,15 +332,19 @@ export default function StocksPage() {
 
   // Quotes for all stocks (used in stock list)
   const [quotes, setQuotes] = useState<Record<string, { current_price: number | null; change_pct: number | null }>>({})
-  const [quotesLoading, setQuotesLoading] = useState(false)
+  const [, setQuotesLoading] = useState(false)
   // Keyed by `${market}:${symbol}` to avoid cross-market symbol collisions
   const [klineSummaries, setKlineSummaries] = useState<Record<string, KlineSummary>>({})
 
   // Auto-refresh (持久化到 localStorage)
   const [autoRefresh, setAutoRefresh] = useLocalStorage('panwatch_stocks_autoRefresh', false)
   const [refreshInterval, setRefreshInterval] = useLocalStorage('panwatch_stocks_refreshInterval', 30)
-  const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null)
+  const [, setNextAutoRefreshAt] = useState<number | null>(null)
+  const [, setAutoRefreshTick] = useState<number>(Date.now())
   const refreshTimerRef = useRef<ReturnType<typeof setInterval>>()
+  const refreshTickRef = useRef<ReturnType<typeof setInterval>>()
+  const progressTimerRef = useRef<ReturnType<typeof setInterval>>()
+  const setAutoRefreshProgress = useAutoRefreshProgress()
 
   // Alerts / Scanning
   const [scanning, setScanning] = useState(false)
@@ -364,6 +377,9 @@ export default function StocksPage() {
   const [insightMarket, setInsightMarket] = useState('CN')
   const [insightName, setInsightName] = useState<string | undefined>(undefined)
   const [insightHasPosition, setInsightHasPosition] = useState(false)
+  const [fundOverviewOpen, setFundOverviewOpen] = useState(false)
+  const [fundOverviewSymbol, setFundOverviewSymbol] = useState('')
+  const [fundOverviewName, setFundOverviewName] = useState<string | undefined>(undefined)
 
   // Market status
   const [marketStatus, setMarketStatus] = useState<MarketStatus[]>([])
@@ -408,8 +424,14 @@ export default function StocksPage() {
   const [agentResultDialog, setAgentResultDialog] = useState<{ title: string; content: string; should_alert: boolean; notified: boolean } | null>(null)
 
   // Stock list filter
-  const [stockListFilter, setStockListFilter] = useState('')  // '' = 全部, 'CN' = A股, 'HK' = 港股, 'US' = 美股
+  const [stockListFilter, setStockListFilter] = useState('')  // '' = 全部, 'CN' = A股, 'HK' = 港股, 'US' = 美股, 'FUND' = 基金
+  const [watchlistKeyword, setWatchlistKeyword] = useState('')
   const [watchlistOnlyAlerts, setWatchlistOnlyAlerts] = useLocalStorage<boolean>('panwatch_watchlist_only_alerts', false)
+  const [watchlistViewMode, setWatchlistViewMode] = useLocalStorage<'card' | 'list'>('panwatch_watchlist_view_mode', 'card')
+  const [portfolioKpiFlashMap, setPortfolioKpiFlashMap] = useState<Record<string, { key: number; dir: 'up' | 'down' | 'neutral' }>>({})
+  const [watchlistQuoteFlashMap, setWatchlistQuoteFlashMap] = useState<Record<string, 'up' | 'down' | 'neutral'>>({})
+  const prevPortfolioKpiRef = useRef<Record<string, number>>({})
+  const prevWatchlistQuoteRef = useRef<Record<string, { current_price: number | null; change_pct: number | null }>>({})
 
   // Remove watchlist modal
   const [removeWatchStock, setRemoveWatchStock] = useState<Stock | null>(null)
@@ -594,11 +616,16 @@ export default function StocksPage() {
     return items
   }, [stocks, portfolioRaw])
 
-  const refreshQuotes = useCallback(async () => {
+  const buildKlineItems = useCallback((): QuoteRequestItem[] => {
+    return buildQuoteItems().filter(item => (item.market || '').toUpperCase() !== 'FUND')
+  }, [buildQuoteItems])
+
+  const refreshQuotes = useCallback(async (options?: { silent?: boolean }) => {
     const items = buildQuoteItems()
     if (items.length === 0) return
 
-    setQuotesLoading(true)
+    const silent = !!options?.silent
+    if (!silent) setQuotesLoading(true)
     try {
       const data = await fetchAPI<QuoteResponse[]>('/quotes/batch', {
         method: 'POST',
@@ -612,11 +639,10 @@ export default function StocksPage() {
         }
       }
       setQuotes(map)
-      setLastRefreshTime(new Date())
     } catch (e) {
       console.warn('刷新行情失败:', e)
     } finally {
-      setQuotesLoading(false)
+      if (!silent) setQuotesLoading(false)
     }
   }, [buildQuoteItems])
 
@@ -638,7 +664,7 @@ export default function StocksPage() {
   const refreshKlines = useCallback(async () => {
     if (klineRefreshInFlight.current) return klineRefreshInFlight.current
     const run = (async () => {
-      const items = buildQuoteItems()
+      const items = buildKlineItems()
       if (items.length === 0) return
       const limit = 5
       const map: Record<string, KlineSummary> = {}
@@ -663,18 +689,19 @@ export default function StocksPage() {
     })()
     klineRefreshInFlight.current = run
     try { await run } finally { klineRefreshInFlight.current = null }
-  }, [buildQuoteItems])
+  }, [buildKlineItems])
 
   // 从建议池加载建议（包含历史建议和多来源建议）
-  const loadPoolSuggestions = useCallback(async () => {
-    setPoolSuggestionsLoading(true)
+  const loadPoolSuggestions = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = !!options?.silent
+    if (!silent) setPoolSuggestionsLoading(true)
     try {
       const data = await fetchAPI<Record<string, PoolSuggestion>>('/suggestions?include_expired=true')
       setPoolSuggestions(data)
     } catch (e) {
       console.warn('加载建议池失败:', e)
     } finally {
-      setPoolSuggestionsLoading(false)
+      if (!silent) setPoolSuggestionsLoading(false)
     }
   }, [])
 
@@ -730,6 +757,12 @@ export default function StocksPage() {
   }, [loadNews])
 
   const openStockDetail = useCallback((stockSymbol: string, stockMarket: string, stockName?: string, hasPosition?: boolean) => {
+    if ((stockMarket || '').toUpperCase() === 'FUND') {
+      setFundOverviewSymbol(stockSymbol)
+      setFundOverviewName(stockName)
+      setFundOverviewOpen(true)
+      return
+    }
     setInsightSymbol(stockSymbol)
     setInsightMarket(stockMarket || 'CN')
     setInsightName(stockName)
@@ -769,6 +802,9 @@ export default function StocksPage() {
     ])
   }, [refreshQuotes, loadPoolSuggestions, refreshKlines])
 
+  // 注册全局刷新回调
+  useRefreshReceiver(handleRefresh)
+
   useEffect(() => { load(); loadPortfolio(); loadPoolSuggestions(); loadPriceAlertSummaries(); refreshKlines() }, [])
 
   // 仅关注列表场景（无持仓）也要在列表加载后预取 K 线摘要，保证技术指标徽章可见
@@ -787,6 +823,7 @@ export default function StocksPage() {
     const now = Date.now()
     const retryGapMs = 2 * 60 * 1000
     const missing = stocks.filter(s => {
+      if ((s.market || '').toUpperCase() === 'FUND') return false
       const key = `${s.market || 'CN'}:${s.symbol}`
       if (klineSummaries[key]) return false
       const lastTry = klineMissingRetryRef.current[key] || 0
@@ -859,7 +896,6 @@ export default function StocksPage() {
       await fetchAPI(url, { method: 'POST' })
       await loadPoolSuggestions()
       await refreshKlines()
-      setLastRefreshTime(new Date())
     } catch (e) {
       console.error('扫描失败:', e)
       toast(e instanceof Error ? e.message : '扫描失败', 'error')
@@ -881,28 +917,62 @@ export default function StocksPage() {
   // Auto-refresh timer
   useEffect(() => {
     if (autoRefresh) {
-      refreshQuotes()
-      refreshKlines()
-      loadPoolSuggestions()
-      refreshTimerRef.current = setInterval(() => {
-        refreshQuotes()
+      const runRefreshCycle = () => {
+        refreshQuotes({ silent: true })
         refreshKlines()
-        loadPoolSuggestions()
+        loadPoolSuggestions({ silent: true })
+        setNextAutoRefreshAt(Date.now() + refreshInterval * 1000)
+      }
+
+      runRefreshCycle()
+      refreshTimerRef.current = setInterval(() => {
+        runRefreshCycle()
       }, refreshInterval * 1000)
+      refreshTickRef.current = setInterval(() => {
+        setAutoRefreshTick(Date.now())
+      }, 250)
+      // 进度更新定时器
+      const startTime = Date.now()
+      const intervalMs = refreshInterval * 1000
+      const tick = () => {
+        const elapsed = Date.now() - startTime
+        const cycleElapsed = elapsed % intervalMs
+        const progress = 1 - cycleElapsed / intervalMs
+        setAutoRefreshProgress({ enabled: true, progress })
+      }
+      tick()
+      progressTimerRef.current = setInterval(tick, 100)
     } else {
       // Clear interval when disabled
       if (refreshTimerRef.current) {
         clearInterval(refreshTimerRef.current)
         refreshTimerRef.current = undefined
       }
+      if (refreshTickRef.current) {
+        clearInterval(refreshTickRef.current)
+        refreshTickRef.current = undefined
+      }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current)
+        progressTimerRef.current = undefined
+      }
+      setNextAutoRefreshAt(null)
+      setAutoRefreshProgress({ enabled: false, progress: 0 })
     }
 
     return () => {
       if (refreshTimerRef.current) {
         clearInterval(refreshTimerRef.current)
       }
+      if (refreshTickRef.current) {
+        clearInterval(refreshTickRef.current)
+      }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current)
+      }
+      setAutoRefreshProgress({ enabled: false, progress: 0 })
     }
-  }, [autoRefresh, refreshInterval, refreshQuotes, refreshKlines])
+  }, [autoRefresh, refreshInterval, refreshQuotes, refreshKlines, loadPoolSuggestions, setAutoRefreshProgress])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -946,8 +1016,15 @@ export default function StocksPage() {
   const refreshStockListCache = async () => {
     setRefreshingStockList(true)
     try {
-      const result = await fetchAPI<{ count: number }>('/stocks/refresh-list', { method: 'POST' })
-      toast(`已刷新股票列表，共 ${result.count} 只`, 'success')
+      const result = await fetchAPI<RefreshListResult>('/stocks/refresh-list', { method: 'POST' })
+      const stockCount = result.stock_count ?? result.count
+      const fundCount = result.fund_count ?? 0
+      const message = searchMarket === 'FUND'
+        ? `已刷新列表，共 ${fundCount} 只`
+        : searchMarket
+          ? `已刷新列表，共 ${stockCount} 只`
+          : `已刷新列表，共 ${result.count} 只（股票 ${stockCount}，基金 ${fundCount}）`
+      toast(message, 'success')
       if (searchQuery) {
         doSearch(searchQuery)
       }
@@ -974,7 +1051,7 @@ export default function StocksPage() {
       load()
       toast('股票已添加', 'success')
     } catch (e) {
-      toast(e instanceof Error ? e.message : '添加股票失败', 'error')
+      toast(e instanceof Error ? e.message : '添加自选失败', 'error')
     }
   }
 
@@ -1295,12 +1372,13 @@ export default function StocksPage() {
     return value.toFixed(2)
   }
 
-  const marketLabel = (m: string) => m === 'CN' ? 'A股' : m === 'HK' ? '港股' : m === 'US' ? '美股' : m
+  const marketLabel = (m: string) => m === 'CN' ? 'A股' : m === 'HK' ? '港股' : m === 'US' ? '美股' : m === 'FUND' ? '基金' : m
 
   // 市场徽章样式和短标签
   const marketBadge = (m: string) => {
     if (m === 'HK') return { style: 'bg-orange-500/10 text-orange-600', label: '港' }
     if (m === 'US') return { style: 'bg-green-500/10 text-green-600', label: '美' }
+    if (m === 'FUND') return { style: 'bg-cyan-500/10 text-cyan-700', label: '基' }
     return { style: 'bg-blue-500/10 text-blue-600', label: 'A' }
   }
 
@@ -1384,6 +1462,23 @@ export default function StocksPage() {
     return { mv, assets, pct }
   }, [portfolio])
 
+  const portfolioDayPnl = useMemo(() => {
+    if (!portfolio) return { dayPnl: 0, pct: 0 }
+    let dayPnl = 0
+    let prevMv = 0
+    const allPos = (portfolio.accounts || []).flatMap(a => a.positions || [])
+    for (const p of allPos) {
+      if (p.current_price_cny == null || p.change_pct == null) continue
+      const prev = p.change_pct === -100 ? null : (p.current_price_cny / (1 + p.change_pct / 100))
+      if (prev == null || !isFinite(prev)) continue
+      const qty = p.quantity || 0
+      dayPnl += (p.current_price_cny - prev) * qty
+      prevMv += prev * qty
+    }
+    const pct = prevMv > 0 ? (dayPnl / prevMv * 100) : 0
+    return { dayPnl, pct }
+  }, [portfolio])
+
   const positionsCount = useMemo(() => {
     return (portfolio?.accounts || []).reduce((acc, a) => acc + (a.positions?.length || 0), 0)
   }, [portfolio])
@@ -1391,6 +1486,86 @@ export default function StocksPage() {
   const watchlistCount = useMemo(() => {
     return stocks.length
   }, [stocks])
+
+  const flashClassByDir = (dir?: 'up' | 'down' | 'neutral') => {
+    if (dir === 'up') return 'animate-highlight-fade-up'
+    if (dir === 'down') return 'animate-highlight-fade-down'
+    return 'animate-highlight-fade-neutral'
+  }
+
+  const getPortfolioKpiFlashClass = (key: string) => {
+    const item = portfolioKpiFlashMap[key]
+    return item ? flashClassByDir(item.dir) : ''
+  }
+
+  const getPortfolioKpiFlashKey = (key: string) => portfolioKpiFlashMap[key]?.key ?? 0
+
+  useEffect(() => {
+    if (!portfolio) {
+      prevPortfolioKpiRef.current = {}
+      return
+    }
+    const nextValues: Record<string, number> = {
+      marketValue: portfolio.total.total_market_value || 0,
+      totalPnl: portfolio.total.total_pnl || 0,
+      dayPnl: portfolioDayPnl.dayPnl || 0,
+      assets: portfolio.total.total_assets || 0,
+    }
+    const prev = prevPortfolioKpiRef.current
+    const updates: Record<string, { dir: 'up' | 'down' | 'neutral' }> = {}
+    for (const [k, v] of Object.entries(nextValues)) {
+      if (!(k in prev)) continue
+      const delta = v - prev[k]
+      updates[k] = { dir: delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral' }
+    }
+    if (Object.keys(updates).length > 0) {
+      setPortfolioKpiFlashMap(prevMap => {
+        const merged = { ...prevMap }
+        for (const [k, v] of Object.entries(updates)) {
+          merged[k] = {
+            key: (prevMap[k]?.key ?? 0) + 1,
+            dir: v.dir,
+          }
+        }
+        return merged
+      })
+    }
+    prevPortfolioKpiRef.current = nextValues
+  }, [portfolio, portfolioDayPnl, positionRatio])
+
+  useEffect(() => {
+    const changed: Record<string, 'up' | 'down' | 'neutral'> = {}
+    const nextPrev: Record<string, { current_price: number | null; change_pct: number | null }> = { ...prevWatchlistQuoteRef.current }
+    for (const stock of stocks) {
+      const key = `${stock.market}:${stock.symbol}`
+      const quote = quotes[key]
+      if (!quote) continue
+      const current = {
+        current_price: quote.current_price ?? null,
+        change_pct: quote.change_pct ?? null,
+      }
+      const prev = prevWatchlistQuoteRef.current[key]
+      if (prev) {
+        const prevPrice = prev.current_price ?? 0
+        const currPrice = current.current_price ?? 0
+        const delta = currPrice - prevPrice
+        changed[key] = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral'
+      }
+      nextPrev[key] = current
+    }
+    prevWatchlistQuoteRef.current = nextPrev
+    const changedKeys = Object.keys(changed)
+    if (changedKeys.length === 0) return
+    setWatchlistQuoteFlashMap(prev => ({ ...prev, ...changed }))
+    const timer = window.setTimeout(() => {
+      setWatchlistQuoteFlashMap(prev => {
+        const next = { ...prev }
+        for (const key of changedKeys) delete next[key]
+        return next
+      })
+    }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [quotes, stocks])
 
   const toggleAccountExpanded = (id: number) => {
     setExpandedAccounts(prev => {
@@ -1480,13 +1655,13 @@ export default function StocksPage() {
           {/* Desktop buttons + controls */}
           <div className="hidden md:flex items-center gap-3">
             {/* Controls */}
-            <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-accent/30">
-              <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 rounded-2xl bg-accent/20 border border-border/40">
+              <div className="flex items-center gap-1 md:gap-1.5">
                 <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
-                <span className="text-[11px] text-muted-foreground">自动刷新</span>
+                <span className="text-[11px] md:text-[12px] text-muted-foreground">自动刷新</span>
                 {autoRefresh && (
                   <Select value={refreshInterval.toString()} onValueChange={v => setRefreshInterval(parseInt(v))}>
-                    <SelectTrigger className="h-6 w-14 text-[10px] px-1.5">
+                    <SelectTrigger className="h-6 w-14 md:w-16 text-[10px] md:text-[11px] px-1.5 md:px-2">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1513,20 +1688,8 @@ export default function StocksPage() {
                   </div>
                 </>
               )}
-              {lastRefreshTime && (
-                <>
-                  <div className="w-px h-4 bg-border" />
-                  <span className="text-[10px] text-muted-foreground/60">
-                    {lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                  </span>
-                </>
-              )}
             </div>
             {/* Buttons */}
-            <Button variant="secondary" onClick={handleRefresh} disabled={quotesLoading}>
-              <RefreshCw className={`w-4 h-4 ${quotesLoading ? 'animate-spin' : ''}`} />
-              刷新
-            </Button>
             <Button variant="secondary" onClick={scanAndReload} disabled={scanning}>
               <Bot className="w-4 h-4" /> 扫描
             </Button>
@@ -1534,14 +1697,11 @@ export default function StocksPage() {
               <Building2 className="w-4 h-4" /> 添加账户
             </Button>
             <Button onClick={() => { setStockForm(emptyStockForm); setSearchQuery(''); setShowStockForm(true) }}>
-              <Plus className="w-4 h-4" /> 添加股票
+              <Plus className="w-4 h-4" /> 添加自选
             </Button>
           </div>
           {/* Mobile buttons */}
           <div className="flex md:hidden items-center gap-1.5">
-            <Button variant="secondary" size="sm" className="h-8 w-8 p-0" onClick={handleRefresh} disabled={quotesLoading}>
-              <RefreshCw className={`w-4 h-4 ${quotesLoading ? 'animate-spin' : ''}`} />
-            </Button>
             <Button variant="secondary" size="sm" className="h-8 w-8 p-0" onClick={scanAndReload} disabled={scanning}>
               <Bot className="w-4 h-4" />
             </Button>
@@ -1555,8 +1715,8 @@ export default function StocksPage() {
         </div>
         {/* Mobile Controls row */}
         <div className="flex md:hidden items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-accent/30">
-            <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 rounded-2xl bg-accent/20 border border-border/40">
+            <div className="flex items-center gap-1 md:gap-1.5">
               <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
               <span className="text-[11px] text-muted-foreground">自动刷新</span>
               {autoRefresh && (
@@ -1582,11 +1742,6 @@ export default function StocksPage() {
               </>
             )}
           </div>
-          {lastRefreshTime && (
-            <span className="text-[10px] text-muted-foreground/60">
-              {lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-            </span>
-          )}
         </div>
       </div>
 
@@ -1606,7 +1761,7 @@ export default function StocksPage() {
         </div>
       ) : portfolio ? (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
-          <div className="card p-4">
+          <div key={`mv-${getPortfolioKpiFlashKey('marketValue')}`} className={`card p-4 ${getPortfolioKpiFlashClass('marketValue')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <TrendingUp className="w-4 h-4" />
               <span className="text-[12px]">总市值</span>
@@ -1615,7 +1770,7 @@ export default function StocksPage() {
               {formatMoney(portfolio.total.total_market_value)}
             </div>
           </div>
-          <div className="card p-4">
+          <div key={`pnl-${getPortfolioKpiFlashKey('totalPnl')}`} className={`card p-4 ${getPortfolioKpiFlashClass('totalPnl')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               {portfolio.total.total_pnl >= 0 ? (
                 <ArrowUpRight className="w-4 h-4 text-rose-500" />
@@ -1633,21 +1788,9 @@ export default function StocksPage() {
           </div>
 
           {(() => {
-            let dayPnl = 0
-            let prevMv = 0
-            const allPos = (portfolio.accounts || []).flatMap(a => a.positions || [])
-            for (const p of allPos) {
-              if (p.current_price_cny == null || p.change_pct == null) continue
-              const prev = p.change_pct === -100 ? null : (p.current_price_cny / (1 + p.change_pct / 100))
-              if (prev == null || !isFinite(prev)) continue
-              const qty = p.quantity || 0
-              dayPnl += (p.current_price_cny - prev) * qty
-              prevMv += prev * qty
-            }
-            const pct = prevMv > 0 ? (dayPnl / prevMv * 100) : 0
-            const isUp = dayPnl >= 0
+            const isUp = portfolioDayPnl.dayPnl >= 0
             return (
-              <div className="card p-4">
+              <div key={`day-pnl-${getPortfolioKpiFlashKey('dayPnl')}`} className={`card p-4 ${getPortfolioKpiFlashClass('dayPnl')}`}>
                 <div className="flex items-center gap-2 text-muted-foreground mb-1">
                   {isUp ? (
                     <ArrowUpRight className="w-4 h-4 text-rose-500" />
@@ -1657,8 +1800,8 @@ export default function StocksPage() {
                   <span className="text-[12px]">今日盈亏</span>
                 </div>
                 <div className={`text-[20px] font-bold font-mono ${isUp ? 'text-rose-500' : 'text-emerald-500'}`}>
-                  {isUp ? '+' : ''}{formatMoney(dayPnl)}
-                  <span className="text-[13px] ml-1.5">({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)</span>
+                  {isUp ? '+' : ''}{formatMoney(portfolioDayPnl.dayPnl)}
+                  <span className="text-[13px] ml-1.5">({portfolioDayPnl.pct >= 0 ? '+' : ''}{portfolioDayPnl.pct.toFixed(2)}%)</span>
                 </div>
               </div>
             )
@@ -1673,7 +1816,7 @@ export default function StocksPage() {
               {formatMoney(portfolio.total.available_funds)}
             </div>
           </div>
-          <div className="card p-4">
+          <div key={`assets-${getPortfolioKpiFlashKey('assets')}`} className={`card p-4 ${getPortfolioKpiFlashClass('assets')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <PiggyBank className="w-4 h-4" />
               <span className="text-[12px]">总资产</span>
@@ -1724,23 +1867,24 @@ export default function StocksPage() {
         </div>
       </div>
 
-      {/* Add Stock Dialog */}
+      {/* Add Watchlist Dialog */}
       <Dialog open={showStockForm} onOpenChange={(open) => { setShowStockForm(open); if (!open) { setSearchQuery(''); setSearchMarket('') } }}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>添加股票到自选</DialogTitle>
-            <DialogDescription>搜索并添加到自选股列表</DialogDescription>
+            <DialogTitle>添加自选</DialogTitle>
+            <DialogDescription>搜索并添加股票或基金到自选列表</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleStockSubmit}>
             <div className="relative" ref={dropdownRef}>
               <div className="flex items-center gap-2 mb-2">
-                <Label className="mb-0">搜索股票</Label>
+                <Label className="mb-0">搜索标的</Label>
                 <div className="flex items-center gap-1">
                   {[
                     { value: '', label: '全部' },
                     { value: 'CN', label: 'A股' },
                     { value: 'HK', label: '港股' },
                     { value: 'US', label: '美股' },
+                    { value: 'FUND', label: '基金' },
                   ].map(opt => (
                     <button
                       key={opt.value}
@@ -1761,7 +1905,7 @@ export default function StocksPage() {
                   onClick={refreshStockListCache}
                   disabled={refreshingStockList}
                   className="text-[10px] text-muted-foreground hover:text-foreground transition-colors ml-2"
-                  title="搜索不到？点击刷新股票列表"
+                  title="搜索不到？点击刷新标的列表"
                 >
                   {refreshingStockList ? (
                     <span className="flex items-center gap-1">
@@ -1780,7 +1924,7 @@ export default function StocksPage() {
                   value={searchQuery}
                   onChange={e => handleSearchInput(e.target.value)}
                   onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
-                  placeholder={searchMarket === 'HK' ? '代码或名称，如 00700 或 腾讯' : searchMarket === 'US' ? '代码或名称，如 AAPL 或 苹果' : '代码或名称，如 600519 或 茅台'}
+                  placeholder={searchMarket === 'HK' ? '代码或名称，如 00700 或 腾讯' : searchMarket === 'US' ? '代码或名称，如 AAPL 或 苹果' : searchMarket === 'FUND' ? '基金代码或名称，如 001186 或 富国文体健康' : '代码或名称，如 600519 或 茅台'}
                   className="pl-10"
                   autoComplete="off"
                 />
@@ -2041,7 +2185,7 @@ export default function StocksPage() {
                                   </td>
                                   <td className="px-4 py-2.5 text-center">
                                     <div className="flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      {(() => { const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true); return (!suggestion && !kline) ? (
+                                      {(() => { const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true); return (!suggestion && !kline && pos.market !== 'FUND') ? (
                                         <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openKlineDialog(pos.symbol, pos.market, pos.name, true)} title="K线指标"><BarChart3 className="w-3 h-3" /></Button>
                                       ) : null })()}
                                       <StockPriceAlertPanel
@@ -2186,7 +2330,7 @@ export default function StocksPage() {
                                   )}
                                 </div>
                                 <div className="flex items-center gap-1">
-                                  {(() => { const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true); return (!suggestion && !kline) ? (
+                                  {(() => { const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true); return (!suggestion && !kline && pos.market !== 'FUND') ? (
                                     <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openKlineDialog(pos.symbol, pos.market, pos.name, true)} title="K线指标"><BarChart3 className="w-3 h-3" /></Button>
                                   ) : null })()}
                                   <StockPriceAlertPanel
@@ -2222,13 +2366,14 @@ export default function StocksPage() {
       {viewTab === 'watchlist' && (
         <div className="card p-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-[13px] font-semibold text-foreground">关注列表</h3>
+            <h3 className="text-[13px] font-semibold text-foreground">列表</h3>
             <div className="flex items-center gap-1">
               {[
                 { value: '', label: '全部', count: stocks.length },
                 { value: 'CN', label: 'A股', count: stocks.filter(s => s.market === 'CN').length },
                 { value: 'HK', label: '港股', count: stocks.filter(s => s.market === 'HK').length },
                 { value: 'US', label: '美股', count: stocks.filter(s => s.market === 'US').length },
+                { value: 'FUND', label: '基金', count: stocks.filter(s => s.market === 'FUND').length },
               ].map(opt => (
                 <button
                   key={opt.value}
@@ -2246,8 +2391,29 @@ export default function StocksPage() {
           </div>
 
           <div className="flex items-center justify-between mb-3">
-            <div className="text-[11px] text-muted-foreground">筛选</div>
+            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-accent/30">
+              <button
+                onClick={() => setWatchlistViewMode('card')}
+                className={`p-1.5 rounded-md transition-colors ${watchlistViewMode === 'card' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                title="卡片视图"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setWatchlistViewMode('list')}
+                className={`p-1.5 rounded-md transition-colors ${watchlistViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                title="列表视图"
+              >
+                <List className="w-3.5 h-3.5" />
+              </button>
+            </div>
             <div className="flex items-center gap-2">
+              <Input
+                value={watchlistKeyword}
+                onChange={(e) => setWatchlistKeyword(e.target.value)}
+                placeholder="搜索代码或名称"
+                className="h-8 w-[170px] sm:w-[220px] text-[12px]"
+              />
               <button
                 onClick={() => setWatchlistOnlyAlerts(!watchlistOnlyAlerts)}
                 className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors ${
@@ -2263,13 +2429,158 @@ export default function StocksPage() {
           </div>
           {stocks.length === 0 ? (
             <div className="py-12 text-center">
-              <div className="text-[13px] text-muted-foreground">还没有添加关注股票</div>
-              <div className="mt-2 text-[11px] text-muted-foreground/70">点击右上角“添加股票”开始</div>
+              <div className="text-[13px] text-muted-foreground">还没有添加自选标的</div>
+              <div className="mt-2 text-[11px] text-muted-foreground/70">点击右上角“添加自选”开始</div>
+            </div>
+          ) : watchlistViewMode === 'list' ? (
+            /* 列表视图 */
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-border/30 bg-accent/20">
+                    <th className="text-left px-3 py-2 text-[11px] font-semibold text-muted-foreground">股票</th>
+                    <th className="text-right px-3 py-2 text-[11px] font-semibold text-muted-foreground">现价</th>
+                    <th className="text-right px-3 py-2 text-[11px] font-semibold text-muted-foreground">涨跌</th>
+                    <th className="text-left px-3 py-2 text-[11px] font-semibold text-muted-foreground hidden md:table-cell">Agent</th>
+                    <th className="text-center px-3 py-2 text-[11px] font-semibold text-muted-foreground">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stocks
+                    .filter(s => !stockListFilter || s.market === stockListFilter)
+                    .filter(s => {
+                      const q = watchlistKeyword.trim().toLowerCase()
+                      if (!q) return true
+                      return String(s.symbol || '').toLowerCase().includes(q) || String(s.name || '').toLowerCase().includes(q)
+                    })
+                    .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || a.id - b.id)
+                    .filter(stock => {
+                      if (!watchlistOnlyAlerts) return true
+                      const { suggestion } = getSuggestionForStock(stock.symbol, stock.market, false)
+                      return !!suggestion?.should_alert
+                    })
+                    .map((stock, i) => {
+                      const quoteKey = `${stock.market}:${stock.symbol}`
+                      const quote = getStockQuote(quoteKey)
+                      const flashClass = watchlistQuoteFlashMap[quoteKey] ? flashClassByDir(watchlistQuoteFlashMap[quoteKey]) : ''
+                      const changeColor = quote?.change_pct != null
+                        ? (quote.change_pct > 0 ? 'text-rose-500' : quote.change_pct < 0 ? 'text-emerald-500' : 'text-muted-foreground')
+                        : 'text-muted-foreground'
+                      return (
+                        <tr
+                          key={stock.id}
+                          draggable={stockListFilter === '' && !watchlistOnlyAlerts}
+                          onDragStart={(e) => {
+                            if (stockListFilter !== '' || watchlistOnlyAlerts) return
+                            watchDragSnapshotRef.current = stocks
+                            setDraggingWatchStockId(stock.id)
+                            e.dataTransfer.effectAllowed = 'move'
+                          }}
+                          onDragOver={(e) => {
+                            if (stockListFilter !== '' || watchlistOnlyAlerts) return
+                            e.preventDefault()
+                            e.dataTransfer.dropEffect = 'move'
+                            if (draggingWatchStockId != null) {
+                              previewWatchlistReorder(draggingWatchStockId, stock.id)
+                            }
+                          }}
+                          onDrop={(e) => {
+                            if (stockListFilter !== '' || watchlistOnlyAlerts) return
+                            e.preventDefault()
+                            if (draggingWatchStockId != null) commitWatchlistReorder()
+                            setDraggingWatchStockId(null)
+                            watchDragSnapshotRef.current = null
+                          }}
+                          onDragEnd={() => {
+                            setDraggingWatchStockId(null)
+                            watchDragSnapshotRef.current = null
+                          }}
+                          className={`group hover:bg-accent/30 transition-colors cursor-pointer ${i > 0 ? 'border-t border-border/20' : ''} ${draggingWatchStockId === stock.id ? 'opacity-60' : ''}`}
+                          onClick={() => {
+                            if (isSuppressCardClick()) return
+                            setAgentDialogStock(stock)
+                          }}
+                        >
+                          <td className="px-3 py-2.5">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-[9px] px-1 py-0.5 rounded ${marketBadge(stock.market).style}`}>
+                                {marketBadge(stock.market).label}
+                              </span>
+                              <button
+                                className="font-mono text-[12px] font-semibold text-foreground hover:text-primary"
+                                onClick={(e) => { e.stopPropagation(); openStockDetail(stock.symbol, stock.market, stock.name, false) }}
+                              >
+                                {stock.symbol}
+                              </button>
+                              <button
+                                className="text-[12px] text-muted-foreground hover:text-primary truncate max-w-[100px]"
+                                onClick={(e) => { e.stopPropagation(); openStockDetail(stock.symbol, stock.market, stock.name, false) }}
+                              >
+                                {stock.name}
+                              </button>
+                            </div>
+                          </td>
+                          <td className={`px-3 py-2.5 text-right font-mono text-[13px] font-medium ${changeColor} ${flashClass}`}>
+                            {quote?.current_price != null ? quote.current_price.toFixed(2) : '--'}
+                          </td>
+                          <td className={`px-3 py-2.5 text-right font-mono text-[12px] ${changeColor} ${flashClass}`}>
+                            {quote?.change_pct != null ? `${quote.change_pct >= 0 ? '+' : ''}${quote.change_pct.toFixed(2)}%` : '--'}
+                          </td>
+                          <td className="px-3 py-2.5 hidden md:table-cell">
+                            <div className="flex items-center gap-1">
+                              {stock.agents && stock.agents.length > 0 ? (
+                                <Badge variant="secondary" className="text-[10px]">{stock.agents.length} Agent</Badge>
+                              ) : (
+                                <span className="text-[10px] text-muted-foreground/60">未配置</span>
+                              )}
+                              {runningAgents[stock.id] && (
+                                <span className="inline-flex items-center gap-1 text-[10px] text-amber-600">
+                                  <span className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <div className="flex items-center justify-center gap-0.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+                              {stock.market !== 'FUND' && (
+                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openKlineDialog(stock.symbol, stock.market, stock.name, false)} title="K线指标">
+                                  <BarChart3 className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                              <StockPriceAlertPanel
+                                mode="icon"
+                                stockId={stock.id}
+                                symbol={stock.symbol}
+                                market={stock.market}
+                                stockName={stock.name}
+                                initialTotal={getPriceAlertSummary(stock.symbol, stock.market).total}
+                                initialEnabled={getPriceAlertSummary(stock.symbol, stock.market).enabled}
+                                onChanged={loadPriceAlertSummaries}
+                              />
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openNewsDialog(stock.name)} title="相关资讯">
+                                <Newspaper className="w-3.5 h-3.5" />
+                              </Button>
+                              <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => setRemoveWatchStock(stock)} title="删除">
+                                <X className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                </tbody>
+              </table>
             </div>
           ) : (
+            /* 卡片视图 */
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {stocks
                 .filter(s => !stockListFilter || s.market === stockListFilter)
+                .filter(s => {
+                  const q = watchlistKeyword.trim().toLowerCase()
+                  if (!q) return true
+                  return String(s.symbol || '').toLowerCase().includes(q) || String(s.name || '').toLowerCase().includes(q)
+                })
                 .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || a.id - b.id)
                 .filter(stock => {
                   if (!watchlistOnlyAlerts) return true
@@ -2277,7 +2588,9 @@ export default function StocksPage() {
                   return !!suggestion?.should_alert
                 })
                 .map((stock) => {
-                const quote = getStockQuote(`${stock.market}:${stock.symbol}`)
+                const quoteKey = `${stock.market}:${stock.symbol}`
+                const quote = getStockQuote(quoteKey)
+                const flashClass = watchlistQuoteFlashMap[quoteKey] ? flashClassByDir(watchlistQuoteFlashMap[quoteKey]) : ''
                 const changeColor = quote?.change_pct != null
                   ? (quote.change_pct > 0 ? 'text-rose-500' : quote.change_pct < 0 ? 'text-emerald-500' : 'text-muted-foreground')
                   : 'text-muted-foreground'
@@ -2338,10 +2651,10 @@ export default function StocksPage() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className={`font-mono text-[14px] font-bold leading-tight ${changeColor}`}>
+                        <div className={`font-mono text-[14px] font-bold leading-tight ${changeColor} ${flashClass}`}>
                           {quote?.current_price != null ? quote.current_price.toFixed(2) : '--'}
                         </div>
-                        <div className={`font-mono text-[11px] leading-tight ${changeColor}`}>
+                        <div className={`font-mono text-[11px] leading-tight ${changeColor} ${flashClass}`}>
                           {quote?.change_pct != null ? `${quote.change_pct >= 0 ? '+' : ''}${quote.change_pct.toFixed(2)}%` : '--'}
                         </div>
                       </div>
@@ -2380,15 +2693,17 @@ export default function StocksPage() {
                         className="flex items-center gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => openKlineDialog(stock.symbol, stock.market, stock.name, false)}
-                          title="K线指标"
-                        >
-                          <BarChart3 className="w-3.5 h-3.5" />
-                        </Button>
+                        {stock.market !== 'FUND' && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => openKlineDialog(stock.symbol, stock.market, stock.name, false)}
+                            title="K线指标"
+                          >
+                            <BarChart3 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
                         <StockPriceAlertPanel
                           mode="icon"
                           stockId={stock.id}
@@ -2407,15 +2722,6 @@ export default function StocksPage() {
                           title="相关资讯"
                         >
                           <Newspaper className="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => openStockDetail(stock.symbol, stock.market, stock.name, false)}
-                          title="详情"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
                         </Button>
                         <Button
                           variant="ghost"
@@ -2454,6 +2760,13 @@ export default function StocksPage() {
         market={insightMarket}
         stockName={insightName}
         hasPosition={insightHasPosition}
+      />
+
+      <FundOverviewModal
+        open={fundOverviewOpen}
+        onOpenChange={setFundOverviewOpen}
+        fundCode={fundOverviewSymbol}
+        fundName={fundOverviewName}
       />
 
       {/* Remove Watchlist Dialog */}
@@ -2567,6 +2880,7 @@ export default function StocksPage() {
                       { value: 'CN', label: 'A股' },
                       { value: 'HK', label: '港股' },
                       { value: 'US', label: '美股' },
+                      { value: 'FUND', label: '基金' },
                     ].map(opt => (
                       <button
                         key={opt.value}
@@ -2589,7 +2903,7 @@ export default function StocksPage() {
                     value={positionSearchQuery}
                     onChange={e => handlePositionSearchInput(e.target.value)}
                     onFocus={() => positionSearchResults.length > 0 && setShowPositionDropdown(true)}
-                    placeholder={positionSearchMarket === 'HK' ? '代码或名称，如 00700 或 腾讯' : positionSearchMarket === 'US' ? '代码或名称，如 LI 或 理想汽车' : positionSearchMarket === 'CN' ? '代码或名称，如 600519 或 茅台' : '代码或名称，如 600519 / 00700 / AAPL'}
+                    placeholder={positionSearchMarket === 'HK' ? '代码或名称，如 00700 或 腾讯' : positionSearchMarket === 'US' ? '代码或名称，如 LI 或 理想汽车' : positionSearchMarket === 'FUND' ? '基金代码或名称，如 001186 或 富国文体健康' : positionSearchMarket === 'CN' ? '代码或名称，如 600519 或 茅台' : '代码或名称，如 600519 / 00700 / AAPL / 001186'}
                     className="pl-9"
                     autoComplete="off"
                   />
@@ -2708,13 +3022,33 @@ export default function StocksPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 mt-2">
-            {agents.length === 0 ? (
-              <p className="text-[13px] text-muted-foreground py-4 text-center">暂无可用 Agent</p>
-            ) : (
-              agents.map(agent => {
+            {(() => {
+              // 根据标的类型过滤可用的Agent
+              const stockMarket = (agentDialogStock?.market || '').toUpperCase()
+              const isFund = stockMarket === 'FUND'
+              
+              // 过滤逻辑：
+              // - 基金：只显示基金专属Agent（market_filter 包含 'FUND'）
+              // - 股票：只显示通用Agent（market_filter 为空）
+              const applicableAgents = agents.filter(agent => {
+                const mf = agent.market_filter || []
+                if (isFund) {
+                  // 基金只能使用基金专属Agent
+                  return mf.includes('FUND')
+                } else {
+                  // 股票只能使用通用Agent（market_filter为空）
+                  return mf.length === 0
+                }
+              })
+              
+              if (applicableAgents.length === 0) {
+                return <p className="text-[13px] text-muted-foreground py-4 text-center">暂无可用 Agent</p>
+              }
+              return applicableAgents.map(agent => {
                 const stockAgent = agentDialogStock?.agents?.find(a => a.agent_name === agent.name)
                 const isAssigned = !!stockAgent
                 const isBatchMode = agent.execution_mode === 'batch'
+                const isFundOnly = (agent.market_filter || []).includes('FUND')
                 return (
                   <div key={agent.name} className="rounded-xl bg-accent/30 hover:bg-accent/50 transition-colors overflow-hidden">
                     <div className="flex items-center justify-between p-3.5">
@@ -2726,6 +3060,11 @@ export default function StocksPage() {
                             <Badge variant="secondary" className="text-[9px]">
                               {isBatchMode ? '批量' : '逐只'}
                             </Badge>
+                            {isFundOnly && (
+                              <Badge variant="outline" className="text-[9px] border-amber-500/50 text-amber-600">
+                                基金专属
+                              </Badge>
+                            )}
                           </div>
                           <p className="text-[11px] text-muted-foreground mt-0.5">{agent.description}</p>
                         </div>
@@ -2876,7 +3215,7 @@ export default function StocksPage() {
                   </div>
                 )
               })
-            )}
+            })()}
           </div>
         </DialogContent>
       </Dialog>

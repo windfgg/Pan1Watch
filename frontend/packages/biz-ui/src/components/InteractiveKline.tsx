@@ -4,6 +4,12 @@ import { fetchAPI } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
 type BusinessDay = { year: number; month: number; day: number }
+type ChartTime = BusinessDay | number  // BusinessDay for daily, Unix timestamp for intraday
+
+// 分钟级K线周期
+const INTRADAY_INTERVALS = new Set(['1min', '5min', '15min', '30min', '60min'])
+
+type KlineInterval = '1d' | '1w' | '1m' | '1min' | '5min' | '15min' | '30min' | '60min'
 
 type KlineItem = {
   date: string
@@ -49,8 +55,38 @@ function parseBusinessDay(dateStr: string): BusinessDay | null {
   return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }
 }
 
-function parseCrosshairDateKey(time: any): string | null {
-  if (!time || typeof time !== 'object') return null
+function parseDateTime(dateStr: string): number | null {
+  // Parse "YYYY-MM-DD HH:MM" format to Unix timestamp
+  const s = String(dateStr || '').trim()
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/)
+  if (!m) return null
+  const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]))
+  return Math.floor(dt.getTime() / 1000)
+}
+
+function parseChartTime(dateStr: string, isIntraday: boolean): ChartTime | null {
+  if (isIntraday) {
+    return parseDateTime(dateStr)
+  }
+  return parseBusinessDay(dateStr)
+}
+
+function parseCrosshairDateKey(time: any, isIntraday: boolean): string | null {
+  if (!time) return null
+  
+  // For intraday: time is Unix timestamp
+  if (isIntraday && typeof time === 'number') {
+    const dt = new Date(time * 1000)
+    const y = dt.getFullYear()
+    const m = String(dt.getMonth() + 1).padStart(2, '0')
+    const d = String(dt.getDate()).padStart(2, '0')
+    const h = String(dt.getHours()).padStart(2, '0')
+    const min = String(dt.getMinutes()).padStart(2, '0')
+    return `${y}-${m}-${d} ${h}:${min}`
+  }
+  
+  // For daily: time is { year, month, day }
+  if (typeof time !== 'object') return null
   const year = Number(time.year)
   const month = Number(time.month)
   const day = Number(time.day)
@@ -155,23 +191,37 @@ function addHistogram(chart: any, LW: any, options: any) {
 export default function InteractiveKline(props: {
   symbol: string
   market: string
-  initialInterval?: '1d' | '1w' | '1m'
+  initialInterval?: KlineInterval
   initialDays?: '60' | '120' | '250'
+  hideRefreshButton?: boolean
+  refreshTrigger?: number
 }) {
   const [lwReady, setLwReady] = useState(!!getLW())
   const [libError, setLibError] = useState(false)
-  const [interval, setIntervalValue] = useState<'1d' | '1w' | '1m'>(props.initialInterval || '1d')
+  const [interval, setIntervalValue] = useState<KlineInterval>(props.initialInterval || '1d')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [data, setData] = useState<KlineItem[]>([])
   const [showRsi, setShowRsi] = useState(true)
   const [hoverTip, setHoverTip] = useState<HoverTip>({ visible: false, x: 0, y: 0, row: null })
 
+  const isIntraday = INTRADAY_INTERVALS.has(interval)
+  const [highlightKey, setHighlightKey] = useState(0)
+  const [highlightUp, setHighlightUp] = useState<boolean | null>(null)
+  const prevMetricRef = useRef<{ close: number; changePct: number } | null>(null)
+
   const fixedDays = useMemo(() => {
     const customDays = Number(props.initialDays)
     if (Number.isFinite(customDays) && customDays > 0) {
       return Math.floor(customDays)
     }
+    // 分钟K线返回条数
+    if (interval === '1min') return 240
+    if (interval === '5min') return 240
+    if (interval === '15min') return 200
+    if (interval === '30min') return 160
+    if (interval === '60min') return 120
+    // 日K / 周K / 月K
     if (interval === '1m') return 360
     if (interval === '1w') return 180
     return 120
@@ -220,6 +270,15 @@ export default function InteractiveKline(props: {
     if (props.initialInterval) setIntervalValue(props.initialInterval)
   }, [props.initialInterval, props.symbol, props.market])
 
+  // 外部触发刷新
+  const refreshTriggerRef = useRef(props.refreshTrigger ?? 0)
+  useEffect(() => {
+    if (props.refreshTrigger != null && props.refreshTrigger !== refreshTriggerRef.current) {
+      refreshTriggerRef.current = props.refreshTrigger
+      void load()
+    }
+  }, [props.refreshTrigger])
+
   useEffect(() => {
     if (lwReady) return
     let cancelled = false
@@ -243,16 +302,16 @@ export default function InteractiveKline(props: {
   }, [lwReady])
 
   const series = useMemo(() => {
-    const klines = (data || []).slice().filter(k => !!parseBusinessDay(k.date))
+    const klines = (data || []).slice().filter(k => !!parseChartTime(k.date, isIntraday))
     const candles = klines.map(k => ({
-      time: parseBusinessDay(k.date) as BusinessDay,
+      time: parseChartTime(k.date, isIntraday) as ChartTime,
       open: k.open,
       high: k.high,
       low: k.low,
       close: k.close,
     }))
     const volumes = klines.map(k => ({
-      time: parseBusinessDay(k.date) as BusinessDay,
+      time: parseChartTime(k.date, isIntraday) as ChartTime,
       value: k.volume,
       color: k.close >= k.open ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)',
     }))
@@ -266,7 +325,7 @@ export default function InteractiveKline(props: {
     const macd = computeMacd(closes)
     const rsi6 = computeRsi(closes, 6)
     return { klines, candles, volumes, ma5, ma10, ma20, volMa5, volMa10, macd, rsi6 }
-  }, [data])
+  }, [data, isIntraday])
 
   const latestMetrics = useMemo(() => {
     if (!series.klines.length) return null
@@ -279,6 +338,27 @@ export default function InteractiveKline(props: {
     const ampPct = last.close ? ((last.high - last.low) / last.close) * 100 : 0
     return { last, changePct, ampPct, maxHigh, minLow, avgVol }
   }, [series.klines])
+
+  // 检测数据变化，触发高亮效果
+  useEffect(() => {
+    if (!latestMetrics) return
+    const current = { close: latestMetrics.last.close, changePct: latestMetrics.changePct }
+    const prev = prevMetricRef.current
+    if (prev) {
+      const delta = current.close - prev.close
+      setHighlightUp(delta > 0 ? true : delta < 0 ? false : null)
+      setHighlightKey(k => k + 1)
+    }
+    prevMetricRef.current = current
+  }, [latestMetrics])
+
+  const highlightClass = highlightKey > 0
+    ? highlightUp === true
+      ? 'animate-highlight-fade-up'
+      : highlightUp === false
+        ? 'animate-highlight-fade-down'
+        : 'animate-highlight-fade-neutral'
+    : ''
 
   const indexByDate = useMemo(() => {
     const m = new Map<string, number>()
@@ -359,7 +439,7 @@ export default function InteractiveKline(props: {
       series.klines
         .map((k, i) => {
           const v = arr[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: parseChartTime(k.date, isIntraday) as ChartTime, value: v }
         })
         .filter(Boolean)
 
@@ -397,13 +477,13 @@ export default function InteractiveKline(props: {
       const macdLineData = series.klines
         .map((k, i) => {
           const v = series.macd.macd[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: parseChartTime(k.date, isIntraday) as ChartTime, value: v }
         })
         .filter(Boolean)
       const sigLineData = series.klines
         .map((k, i) => {
           const v = series.macd.signal[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: parseChartTime(k.date, isIntraday) as ChartTime, value: v }
         })
         .filter(Boolean)
       const histData = series.klines
@@ -411,7 +491,7 @@ export default function InteractiveKline(props: {
           const v = series.macd.hist[i]
           if (v == null) return null
           return {
-            time: parseBusinessDay(k.date) as BusinessDay,
+            time: parseChartTime(k.date, isIntraday) as ChartTime,
             value: v,
             color: v >= 0 ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)',
           }
@@ -446,7 +526,7 @@ export default function InteractiveKline(props: {
       const rsiData = series.klines
         .map((k, i) => {
           const v = series.rsi6[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: parseChartTime(k.date, isIntraday) as ChartTime, value: v }
         })
         .filter(Boolean)
       rsiLine.setData(rsiData as any)
@@ -465,7 +545,7 @@ export default function InteractiveKline(props: {
     chart.timeScale().subscribeVisibleTimeRangeChange(sync)
     chart.subscribeCrosshairMove?.((param: any) => {
       const point = param?.point
-      const dateKey = parseCrosshairDateKey(param?.time)
+      const dateKey = parseCrosshairDateKey(param?.time, isIntraday)
       if (!point || !dateKey || !series.klines.length) {
         setHoverTip(prev => (prev.visible ? { visible: false, x: 0, y: 0, row: null } : prev))
         return
@@ -545,7 +625,7 @@ export default function InteractiveKline(props: {
         // ignore
       }
     }
-  }, [series, lwReady, showRsi, indexByDate, interval])
+  }, [series, lwReady, showRsi, indexByDate, interval, isIntraday])
 
   return (
     <div className="card p-4 md:p-5">
@@ -555,6 +635,30 @@ export default function InteractiveKline(props: {
           <Button variant={showRsi ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowRsi(v => !v)}>
             强弱线
           </Button>
+          {/* 分钟K选择器 */}
+          <div className="inline-flex rounded-lg border border-border/60 bg-accent/20 p-0.5">
+            {([
+              { value: '1min', label: '1分' },
+              { value: '5min', label: '5分' },
+              { value: '15min', label: '15分' },
+              { value: '30min', label: '30分' },
+              { value: '60min', label: '60分' },
+            ] as const).map(item => (
+              <button
+                key={item.value}
+                type="button"
+                className={`h-7 min-w-[36px] rounded-md px-1.5 text-[11px] transition-colors ${
+                  interval === item.value
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
+                }`}
+                onClick={() => setIntervalValue(item.value)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          {/* 日/周/月K选择器 */}
           <div className="inline-flex rounded-lg border border-border/60 bg-accent/20 p-0.5">
             {([
               { value: '1d', label: '日K' },
@@ -575,10 +679,12 @@ export default function InteractiveKline(props: {
               </button>
             ))}
           </div>
-          <Button variant="secondary" size="sm" className="h-8" onClick={() => void load()} disabled={loading}>
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">刷新</span>
-          </Button>
+          {!props.hideRefreshButton && (
+            <Button variant="secondary" size="sm" className="h-8" onClick={() => void load()} disabled={loading}>
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">刷新</span>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -604,9 +710,9 @@ export default function InteractiveKline(props: {
           ))}
         </div>
       ) : latestMetrics ? (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
-          <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">最新价</span> <span className="font-mono ml-1">{latestMetrics.last.close.toFixed(2)}</span></div>
-          <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">涨跌</span> <span className={`font-mono ml-1 ${latestMetrics.changePct >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>{latestMetrics.changePct >= 0 ? '+' : ''}{latestMetrics.changePct.toFixed(2)}%</span></div>
+        <div key={highlightKey} className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
+          <div className={`rounded-lg bg-accent/20 px-2.5 py-2 text-[11px] ${highlightClass}`}><span className="text-muted-foreground">最新价</span> <span className="font-mono ml-1">{latestMetrics.last.close.toFixed(2)}</span></div>
+          <div className={`rounded-lg bg-accent/20 px-2.5 py-2 text-[11px] ${highlightClass}`}><span className="text-muted-foreground">涨跌</span> <span className={`font-mono ml-1 ${latestMetrics.changePct >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>{latestMetrics.changePct >= 0 ? '+' : ''}{latestMetrics.changePct.toFixed(2)}%</span></div>
           <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">振幅</span> <span className="font-mono ml-1">{latestMetrics.ampPct.toFixed(2)}%</span></div>
           <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">区间高低</span> <span className="font-mono ml-1">{latestMetrics.maxHigh.toFixed(2)}/{latestMetrics.minLow.toFixed(2)}</span></div>
           <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">均量</span> <span className="font-mono ml-1">{(latestMetrics.avgVol / 10000).toFixed(1)}万</span></div>
