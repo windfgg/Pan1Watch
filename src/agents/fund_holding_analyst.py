@@ -1,4 +1,4 @@
-"""基金持仓分析 Agent
+"""基金分析 Agent
 
 轻量级Agent，只能由基金标的使用，股票无法配置。
 功能：
@@ -23,7 +23,8 @@ from src.core.signals.structured_output import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "fund_holding_analyst.md"
+PROMPT_PATH = Path(__file__).parent.parent.parent / \
+    "prompts" / "fund_holding_analyst.md"
 
 # 建议类型映射
 FUND_ACTION_MAP = {
@@ -36,10 +37,10 @@ FUND_ACTION_MAP = {
 
 
 class FundHoldingAnalystAgent(BaseAgent):
-    """基金持仓分析 Agent - 仅适用于基金标的"""
+    """基金分析 Agent - 仅适用于基金标的"""
 
     name = "fund_holding_analyst"
-    display_name = "基金持仓分析"
+    display_name = "基金分析"
     description = "分析基金重仓股与持仓重叠度，跟踪基金业绩与重仓股表现（仅基金可用）"
     # 标记此Agent仅限基金使用
     market_filter = ["FUND"]
@@ -50,7 +51,8 @@ class FundHoldingAnalystAgent(BaseAgent):
         fund_data_list = []
 
         # 只处理基金类型的标的
-        fund_watchlist = [s for s in context.watchlist if s.market.value == "FUND"]
+        fund_watchlist = [
+            s for s in context.watchlist if s.market.value == "FUND"]
 
         if not fund_watchlist:
             raise RuntimeError("当前关注列表中没有基金，此Agent仅适用于基金标的")
@@ -87,14 +89,18 @@ class FundHoldingAnalystAgent(BaseAgent):
                 if points:
                     # 最近一周收益
                     if len(points) >= 5:
-                        week_start = points[-5]["value"] if points[-5].get("value") else None
-                        week_end = points[-1]["value"] if points[-1].get("value") else None
+                        week_start = points[-5]["value"] if points[-5].get(
+                            "value") else None
+                        week_end = points[-1]["value"] if points[-1].get(
+                            "value") else None
                         if week_start and week_end and week_start > 0:
                             week_return = (week_end / week_start - 1) * 100
                     # 最近一月收益
                     if len(points) >= 20:
-                        month_start = points[-20]["value"] if points[-20].get("value") else None
-                        month_end = points[-1]["value"] if points[-1].get("value") else None
+                        month_start = points[-20]["value"] if points[-20].get(
+                            "value") else None
+                        month_end = points[-1]["value"] if points[-1].get(
+                            "value") else None
                         if month_start and month_end and month_start > 0:
                             recent_return = (month_end / month_start - 1) * 100
 
@@ -142,24 +148,25 @@ class FundHoldingAnalystAgent(BaseAgent):
             "total_cost": total_cost,
         }
 
-    def build_prompt(self, context: AgentContext, collected_data: dict) -> str:
+    def build_prompt(self, data: dict, context: AgentContext) -> tuple[str, str]:
         """构建分析提示词"""
         lines = [
-            "# 基金持仓分析任务",
+            "# 基金分析任务",
             "",
             f"**分析时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             "",
         ]
 
-        fund_data = collected_data.get("fund_data", [])
-        user_stock_count = collected_data.get("user_stock_count", 0)
+        fund_data = data.get("fund_data", [])
+        user_stock_count = data.get("user_stock_count", 0)
 
         lines.append(f"## 用户持仓股票数量: {user_stock_count} 只")
         lines.append("")
 
         for fd in fund_data:
             if fd.get("error"):
-                lines.append(f"### {fd['fund_name']}（{fd['fund_code']}）- 数据获取失败")
+                lines.append(
+                    f"### {fd['fund_name']}（{fd['fund_code']}）- 数据获取失败")
                 lines.append(f"错误: {fd['error']}")
                 lines.append("")
                 continue
@@ -170,7 +177,8 @@ class FundHoldingAnalystAgent(BaseAgent):
             # 持仓信息
             holding = fd.get("holding_info")
             if holding:
-                lines.append(f"**用户持仓**: {holding['quantity']} 份，成本 {holding['avg_cost']:.4f}，总投入 {holding['total_cost']:.0f} 元")
+                lines.append(
+                    f"**用户持仓**: {holding['quantity']} 份，成本 {holding['avg_cost']:.4f}，总投入 {holding['total_cost']:.0f} 元")
             else:
                 lines.append("**用户持仓**: 未持有（仅关注）")
             lines.append("")
@@ -195,8 +203,10 @@ class FundHoldingAnalystAgent(BaseAgent):
                     change = h.get("change_pct")
                     change_str = f"{change:+.2f}%" if change is not None else "N/A"
                     weight = h.get("weight")
-                    weight_str = f"{weight:.2f}%" if weight is not None else h.get("weight_text", "N/A")
-                    lines.append(f"- {h.get('name', 'N/A')}（{h.get('code', 'N/A')}）: 占比 {weight_str}，今日 {change_str}")
+                    weight_str = f"{weight:.2f}%" if weight is not None else h.get(
+                        "weight_text", "N/A")
+                    lines.append(
+                        f"- {h.get('name', 'N/A')}（{h.get('code', 'N/A')}）: 占比 {weight_str}，今日 {change_str}")
                 lines.append("")
 
             # 机构共识（与用户持仓重叠）
@@ -206,7 +216,8 @@ class FundHoldingAnalystAgent(BaseAgent):
                 for o in overlap:
                     change = o.get("change_pct")
                     change_str = f"{change:+.2f}%" if change is not None else "N/A"
-                    lines.append(f"- {o['name']}（{o['code']}）: 基金占比 {o.get('weight', 0):.2f}%，今日 {change_str}")
+                    lines.append(
+                        f"- {o['name']}（{o['code']}）: 基金占比 {o.get('weight', 0):.2f}%，今日 {change_str}")
                 lines.append("")
             else:
                 lines.append("**机构共识**: 无重叠（该基金重仓股与你的股票持仓无交集）")
@@ -222,7 +233,9 @@ class FundHoldingAnalystAgent(BaseAgent):
         else:
             prompt_template = self._default_prompt()
 
-        return prompt_template.replace("{{DATA}}", "\n".join(lines))
+        system_prompt = "你是一位专业的基金分析师，请严格基于输入数据输出结论。"
+        user_content = prompt_template.replace("{{DATA}}", "\n".join(lines))
+        return system_prompt, user_content
 
     def _default_prompt(self) -> str:
         """默认提示词"""
@@ -251,79 +264,92 @@ class FundHoldingAnalystAgent(BaseAgent):
 }
 </STRUCTURED_OUTPUT>"""
 
-    async def analyze(
-        self,
-        context: AgentContext,
-        collected_data: dict,
-    ) -> AnalysisResult:
-        """调用 AI 分析"""
-        prompt = self.build_prompt(context, collected_data)
-        raw = await self.ai_client.chat(prompt, use_structured_output=False)
-        return AnalysisResult(raw_content=raw, prompt=prompt)
+    async def analyze(self, context: AgentContext, data: dict) -> AnalysisResult:
+        """调用 AI 分析，并保存历史与建议"""
+        system_prompt, user_content = self.build_prompt(data, context)
+        content = await context.ai_client.chat(system_prompt, user_content)
 
-    async def report(
-        self,
-        context: AgentContext,
-        collected_data: dict,
-        analysis: AnalysisResult,
-    ) -> str:
-        """处理分析结果，保存报告和建议"""
-        raw = analysis.raw_content
-        today = datetime.now().strftime("%Y-%m-%d")
+        if context.model_label:
+            idx = content.rfind(TAG_START)
+            if idx >= 0:
+                content = (
+                    content[:idx].rstrip()
+                    + f"\n\n---\nAI: {context.model_label}\n\n"
+                    + content[idx:]
+                )
+            else:
+                content = content.rstrip() + \
+                    f"\n\n---\nAI: {context.model_label}"
 
-        # 提取结构化输出
-        structured = try_extract_tagged_json(raw)
-        clean_content = strip_tagged_json(raw)
+        structured = try_extract_tagged_json(content) or {}
+        display_content = strip_tagged_json(content)
 
-        # 保存分析报告
-        title = f"基金持仓分析周报 - {today}"
+        fund_items = [
+            f"{(s.name or s.symbol).strip()}({s.symbol})"
+            for s in context.watchlist
+            if getattr(s, "market", None) and s.market.value == "FUND"
+        ]
+        stock_names = "、".join(fund_items[:5]) if fund_items else "无基金"
+        if len(fund_items) > 5:
+            stock_names += f" 等{len(fund_items)}只"
+
+        title = f"【{self.display_name}】{stock_names}"
+        result = AnalysisResult(
+            agent_name=self.name,
+            title=title,
+            content=display_content,
+            raw_data={**data, "structured": structured} if structured else data,
+        )
+
+        # 保存历史分析
         save_analysis(
             agent_name=self.name,
-            stock_symbol="*",  # 全局报告
+            stock_symbol="*",
             title=title,
-            content=clean_content,
-            suggestions=structured,
+            content=result.content,
+            raw_data={
+                "timestamp": data.get("timestamp"),
+                "fund_data": data.get("fund_data", []),
+                "user_stock_count": data.get("user_stock_count", 0),
+                "structured": structured,
+                "prompt_context": user_content[:12000],
+            },
         )
 
-        # 为每只基金保存单独的建议
-        fund_data = collected_data.get("fund_data", [])
-        if structured and "funds" in structured:
-            fund_suggestions = structured.get("funds", {})
-            for fd in fund_data:
-                fund_code = fd.get("fund_code")
-                if not fund_code:
-                    continue
-                fund_name = fd.get("fund_name", fund_code)
-                sug = fund_suggestions.get(fund_code, {})
-                action = sug.get("action", "watch")
-                action_label = sug.get("action_label", "暂时观望")
-                reason = sug.get("reason", "")
+        # 保存建议到建议池
+        fund_suggestions = structured.get(
+            "funds", {}) if isinstance(structured, dict) else {}
+        for fd in data.get("fund_data", []):
+            fund_code = fd.get("fund_code")
+            if not fund_code:
+                continue
+            fund_name = fd.get("fund_name") or fund_code
+            sug = fund_suggestions.get(fund_code, {}) if isinstance(
+                fund_suggestions, dict) else {}
 
-                if action and action_label:
-                    save_suggestion(
-                        symbol=fund_code,
-                        market="FUND",
-                        stock_name=fund_name,
-                        action=action,
-                        action_label=action_label,
-                        reason=reason,
-                        agent_name=self.name,
-                        confidence=0.7,
-                        valid_until=None,
-                    )
+            action = str(sug.get("action") or "watch").strip().lower()
+            action_label = str(sug.get("action_label") or "暂时观望").strip()
+            reason = str(sug.get("reason") or "").strip()
 
-        # 发送通知
-        notify_content = f"📊 {title}\n\n{clean_content[:500]}..."
-        await self.notify(
-            title=title,
-            content=notify_content,
-            policy=context.notify_policy,
-        )
+            if action not in {"hold", "add", "reduce", "dca", "watch"}:
+                action = "watch"
+            if not action_label:
+                action_label = "暂时观望"
 
-        return clean_content
+            save_suggestion(
+                stock_symbol=fund_code,
+                stock_name=fund_name,
+                action=action,
+                action_label=action_label,
+                reason=reason,
+                agent_name=self.name,
+                agent_label=self.display_name,
+                stock_market="FUND",
+                prompt_context=user_content,
+                ai_response=result.content,
+                meta={
+                    "source": "fund_holding_analyst",
+                },
+            )
 
-    async def run(self, context: AgentContext) -> str:
-        """执行完整流程"""
-        collected = await self.collect(context)
-        result = await self.analyze(context, collected)
-        return await self.report(context, collected, result)
+        return result

@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+import inspect
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -808,6 +809,52 @@ AGENT_REGISTRY: dict[str, type] = {
 }
 
 
+def _build_agent_instance(agent_cls: type, agent_name: str, kwargs: dict | None = None):
+    """Create agent instance with safe kwargs filtering.
+
+    If kwargs include unsupported keys for a specific agent constructor,
+    they are ignored and logged instead of causing runtime failures.
+    """
+    init_kwargs = dict(kwargs or {})
+    if not init_kwargs:
+        return agent_cls()
+
+    try:
+        if agent_cls.__init__ is object.__init__:
+            ignored_keys = sorted(init_kwargs.keys())
+            logger.warning(
+                f"Agent {agent_name} 不支持配置项 {ignored_keys}，已忽略"
+            )
+            return agent_cls()
+
+        sig = inspect.signature(agent_cls.__init__)
+        params = sig.parameters
+        accepts_var_kw = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if accepts_var_kw:
+            return agent_cls(**init_kwargs)
+
+        allowed_keys = {
+            name
+            for name, p in params.items()
+            if name != "self"
+            and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        filtered_kwargs = {k: v for k,
+                           v in init_kwargs.items() if k in allowed_keys}
+        ignored_keys = sorted(k for k in init_kwargs if k not in allowed_keys)
+        if ignored_keys:
+            logger.warning(
+                f"Agent {agent_name} 不支持配置项 {ignored_keys}，已忽略"
+            )
+
+        return agent_cls(**filtered_kwargs) if filtered_kwargs else agent_cls()
+    except TypeError:
+        # Keep backward compatible behavior: fallback to no-arg construction.
+        logger.warning(f"Agent {agent_name} 参数不匹配，回退为默认实例")
+        return agent_cls()
+
+
 def build_scheduler() -> AgentScheduler:
     """构建调度器并注册已启用的 Agent"""
     settings = Settings()
@@ -836,12 +883,11 @@ def build_scheduler() -> AgentScheduler:
                 continue
 
             agent_kwargs = cfg.config or {}
-            try:
-                agent_instance = (
-                    agent_cls(**agent_kwargs) if agent_kwargs else agent_cls()
-                )
-            except TypeError:
-                agent_instance = agent_cls()
+            agent_instance = _build_agent_instance(
+                agent_cls=agent_cls,
+                agent_name=cfg.name,
+                kwargs=agent_kwargs,
+            )
             sched.register(
                 agent_instance,
                 schedule=cfg.schedule,
@@ -942,11 +988,12 @@ async def trigger_agent(agent_name: str) -> str:
         execution_mode = get_agent_execution_mode(agent_name)
         agent_config = get_agent_config(agent_name)
 
-        # 根据配置初始化 Agent
-        if agent_config:
-            agent = agent_cls(**agent_config)
-        else:
-            agent = agent_cls()
+        # 根据配置初始化 Agent（自动忽略不支持的参数）
+        agent = _build_agent_instance(
+            agent_cls=agent_cls,
+            agent_name=agent_name,
+            kwargs=agent_config,
+        )
 
         try:
             if execution_mode == "single" and hasattr(agent, "run_single"):
@@ -1054,12 +1101,17 @@ async def trigger_agent_for_stock(
 
     # 创建 agent，支持 intraday_monitor 的手动触发参数
     if agent_name == "intraday_monitor":
-        agent = agent_cls(
-            bypass_throttle=bypass_throttle,
-            bypass_market_hours=bypass_market_hours,
+        agent = _build_agent_instance(
+            agent_cls=agent_cls,
+            agent_name=agent_name,
+            kwargs={
+                "bypass_throttle": bypass_throttle,
+                "bypass_market_hours": bypass_market_hours,
+            },
         )
     else:
-        agent = agent_cls()
+        agent = _build_agent_instance(
+            agent_cls=agent_cls, agent_name=agent_name)
 
     with log_context(
         trace_id=trace_id,

@@ -148,9 +148,9 @@ AGENT_SEED_SPECS: tuple[AgentSeedSpec, ...] = (
     ),
     AgentSeedSpec(
         name="fund_holding_analyst",
-        display_name="基金持仓分析",
+        display_name="基金分析",
         description="分析基金重仓股与持仓重叠度，跟踪基金业绩表现（仅基金可用）",
-        enabled=False,
+        enabled=True,
         schedule="0 20 * * 5",  # 每周五晚8点
         execution_mode="batch",
         kind=AGENT_KIND_WORKFLOW,
