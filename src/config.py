@@ -66,34 +66,3 @@ class AppConfig:
 
     settings: Settings
     watchlist: list[StockConfig] = field(default_factory=list)
-
-
-def load_watchlist(path: str | Path = "config/watchlist.yaml") -> list[StockConfig]:
-    """从 YAML 加载自选股列表"""
-    path = Path(path)
-    if not path.exists():
-        return []
-
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    stocks = []
-    for market_group in data.get("markets", []):
-        market_code = MarketCode(market_group["code"])
-        for stock in market_group.get("stocks", []):
-            stocks.append(
-                StockConfig(
-                    symbol=stock["symbol"],
-                    name=stock["name"],
-                    market=market_code,
-                )
-            )
-
-    return stocks
-
-
-def load_config() -> AppConfig:
-    """加载完整配置"""
-    settings = Settings()
-    watchlist = load_watchlist()
-    return AppConfig(settings=settings, watchlist=watchlist)
