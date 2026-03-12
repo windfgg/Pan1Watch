@@ -79,6 +79,7 @@ class XueqiuNewsCollector(BaseNewsCollector):
 
     def __init__(self, cookies: str = ""):
         self.cookies = cookies
+        self.last_error: str = ""  # 记录最近的错误信息
 
     def _get_symbol_id(self, symbol: str) -> str:
         """转换为雪球 symbol_id 格式"""
@@ -91,6 +92,7 @@ class XueqiuNewsCollector(BaseNewsCollector):
 
     async def fetch_news(self, symbols: list[str] | None = None, since: datetime | None = None) -> list[NewsItem]:
         """获取雪球个股新闻（并发请求）"""
+        self.last_error = ""  # 重置错误
         if not symbols:
             return []
 
@@ -110,7 +112,8 @@ class XueqiuNewsCollector(BaseNewsCollector):
             headers["Cookie"] = self.cookies
 
         async with httpx.AsyncClient(timeout=8, headers=headers) as client:
-            tasks = [self._fetch_for_symbol(client, symbol, since) for symbol in a_share_symbols]
+            tasks = [self._fetch_for_symbol(
+                client, symbol, since) for symbol in a_share_symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_news = []
@@ -136,8 +139,20 @@ class XueqiuNewsCollector(BaseNewsCollector):
             resp = await client.get(self.API_URL, params=params)
             if resp.status_code == 400:
                 # 需要登录，跳过
+                self.last_error = "需要登录，请配置有效的 Cookie"
                 return []
             resp.raise_for_status()
+
+            # 检测 WAF 拦截（返回 HTML 而非 JSON）
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" in content_type or resp.text.strip().startswith("<"):
+                if "aliyun" in resp.text.lower() or "waf" in resp.text.lower():
+                    self.last_error = "雪球已启用阿里云 WAF 防护，简单 Cookie 无法绕过验证。"
+                else:
+                    self.last_error = "雪球返回非 JSON 数据，可能已启用反爬机制"
+                logger.warning(f"雪球 WAF 拦截: {resp.text[:200]}")
+                return []
+
             data = resp.json()
 
             items = data.get("list", [])
@@ -189,7 +204,8 @@ class XueqiuNewsCollector(BaseNewsCollector):
             importance = 1
 
         # 原文链接
-        url = item.get("target", "") or f"https://xueqiu.com/{item.get('user_id', '')}/{external_id}"
+        url = item.get(
+            "target", "") or f"https://xueqiu.com/{item.get('user_id', '')}/{external_id}"
 
         return NewsItem(
             source=self.source,
@@ -237,7 +253,8 @@ class EastMoneyStockNewsCollector(BaseNewsCollector):
 
             db = SessionLocal()
             try:
-                stocks = db.query(Stock).filter(Stock.symbol.in_(symbols)).all()
+                stocks = db.query(Stock).filter(
+                    Stock.symbol.in_(symbols)).all()
                 return {s.symbol: s.name for s in stocks}
             finally:
                 db.close()
@@ -286,7 +303,8 @@ class EastMoneyStockNewsCollector(BaseNewsCollector):
         }
         async with httpx.AsyncClient(timeout=8, verify=False, headers=headers) as client:
             tasks = [
-                fetch_with_limit(client, symbol, symbol_names.get(symbol, symbol))
+                fetch_with_limit(
+                    client, symbol, symbol_names.get(symbol, symbol))
                 for symbol in symbols
                 if symbol in symbol_names  # 只查询有名称的股票
             ]
@@ -483,7 +501,8 @@ class EastMoneyNewsCollector(BaseNewsCollector):
                 try:
                     # 从公告中提取关联的股票代码
                     codes = item.get("codes", []) or []
-                    stock_codes = [c.get("stock_code", "") for c in codes if c.get("stock_code")]
+                    stock_codes = [c.get("stock_code", "")
+                                   for c in codes if c.get("stock_code")]
                     if not stock_codes:
                         stock_codes = a_share_symbols[:1]
 
@@ -599,7 +618,8 @@ class NewsCollector:
 
         # 如果没有配置数据源，使用默认
         if not collectors:
-            collectors = [EastMoneyStockNewsCollector(), EastMoneyNewsCollector()]
+            collectors = [EastMoneyStockNewsCollector(),
+                          EastMoneyNewsCollector()]
 
         return cls(collectors=collectors)
 
@@ -648,7 +668,8 @@ class NewsCollector:
             all_news.extend(news_list)
 
         # 按时间倒序 + 重要性倒序排列
-        all_news.sort(key=lambda x: (x.publish_time, x.importance), reverse=True)
+        all_news.sort(key=lambda x: (
+            x.publish_time, x.importance), reverse=True)
 
         # 去重（按 source + external_id）
         seen = set()

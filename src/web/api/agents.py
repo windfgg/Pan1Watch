@@ -18,6 +18,7 @@ from src.config import Settings
 from src.core.agent_catalog import (
     AGENT_KIND_CAPABILITY,
     AGENT_KIND_WORKFLOW,
+    FUND_ONLY_AGENT_NAMES,
     infer_agent_kind,
 )
 
@@ -196,6 +197,7 @@ class AgentConfigResponse(BaseModel):
     ai_model_id: int | None
     notify_channel_ids: list[int]
     config: dict
+    market_filter: list[str]  # 空列表表示无限制，["FUND"]表示仅基金可用
 
     class Config:
         from_attributes = True
@@ -237,6 +239,8 @@ def list_agents(
 
 def _agent_to_response(agent: AgentConfig) -> dict:
     kind = (agent.kind or "").strip() or infer_agent_kind(agent.name)
+    # 确定 market_filter：基金专属Agent只能用于基金
+    market_filter = ["FUND"] if agent.name in FUND_ONLY_AGENT_NAMES else []
     return {
         "id": agent.id,
         "name": agent.name,
@@ -253,6 +257,7 @@ def _agent_to_response(agent: AgentConfig) -> dict:
         "ai_model_id": agent.ai_model_id,
         "notify_channel_ids": agent.notify_channel_ids or [],
         "config": agent.config or {},
+        "market_filter": market_filter,
     }
 
 

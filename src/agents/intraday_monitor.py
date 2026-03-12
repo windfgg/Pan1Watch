@@ -51,7 +51,8 @@ SUGGESTION_TYPES = {
     "观望": "watch",  # 暂不操作
 }
 
-PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "intraday_monitor.txt"
+PROMPT_PATH = Path(__file__).parent.parent.parent / \
+    "prompts" / "intraday_monitor.txt"
 
 
 class IntradayMonitorAgent(BaseAgent):
@@ -102,8 +103,13 @@ class IntradayMonitorAgent(BaseAgent):
     async def collect(self, context: AgentContext) -> dict:
         """采集实时行情 + K线 + 历史分析"""
         if not context.watchlist:
-            logger.warning("自选股列表为空，跳过盘中监测")
-            return {"stocks": [], "stock_data": None}
+            msg = "未绑定股票，已跳过盘中监测"
+            logger.warning(msg)
+            return {
+                "stocks": [],
+                "stock_data": None,
+                "skip_reason": msg,
+            }
 
         # SignalPack: 统一结构化输入（quote/technical/position）
         stock_config = context.watchlist[0] if context.watchlist else None
@@ -145,7 +151,8 @@ class IntradayMonitorAgent(BaseAgent):
             kline_days=60,
             persist_snapshot=True,
         )
-        symbol_context = (context_pack.get("symbols", {}) or {}).get(symbol, {})
+        symbol_context = (context_pack.get(
+            "symbols", {}) or {}).get(symbol, {})
         quality_overview = context_pack.get("quality_overview", {}) or {}
 
         stock_data = pack.quote if pack and pack.quote else None
@@ -256,7 +263,8 @@ class IntradayMonitorAgent(BaseAgent):
                 lines.append(
                     f"- [{item.get('time')}] {item.get('title')}（{item.get('source')}）"
                 )
-            hist_topic = (layered_news.get("history_topic") or {}).get("summary")
+            hist_topic = (layered_news.get(
+                "history_topic") or {}).get("summary")
             if hist_topic:
                 lines.append(f"- 历史新闻主题：{hist_topic}")
 
@@ -313,7 +321,8 @@ class IntradayMonitorAgent(BaseAgent):
 
             # 布林带
             boll_status = kline.get("boll_status")
-            boll_upper, boll_lower = kline.get("boll_upper"), kline.get("boll_lower")
+            boll_upper, boll_lower = kline.get(
+                "boll_upper"), kline.get("boll_lower")
             if boll_status and boll_upper is not None:
                 lines.append(
                     f"- 布林带：上轨={format_num(boll_upper)} 下轨={format_num(boll_lower)}（{boll_status}）"
@@ -365,13 +374,15 @@ class IntradayMonitorAgent(BaseAgent):
                 pass
 
             # 多级支撑压力
-            support_m, resistance_m = kline.get("support_m"), kline.get("resistance_m")
+            support_m, resistance_m = kline.get(
+                "support_m"), kline.get("resistance_m")
             if support_m and resistance_m:
                 lines.append(
                     f"- 中期支撑：{format_num(support_m)} | 中期压力：{format_num(resistance_m)}"
                 )
 
-            support_s, resistance_s = kline.get("support_s"), kline.get("resistance_s")
+            support_s, resistance_s = kline.get(
+                "support_s"), kline.get("resistance_s")
             if support_s and resistance_s:
                 lines.append(
                     f"- 短期支撑：{format_num(support_s)} | 短期压力：{format_num(resistance_s)}"
@@ -393,7 +404,8 @@ class IntradayMonitorAgent(BaseAgent):
 
         # 账户资金情况
         lines.append(f"\n## 账户资金")
-        lines.append(f"- 总可用资金：{context.portfolio.total_available_funds:.0f} 元")
+        lines.append(
+            f"- 总可用资金：{context.portfolio.total_available_funds:.0f} 元")
         for acc in context.portfolio.accounts:
             lines.append(f"  - {acc.name}：{acc.available_funds:.0f} 元")
         constraints = symbol_ctx.get("constraints") or {}
@@ -497,7 +509,8 @@ class IntradayMonitorAgent(BaseAgent):
         }
 
         # 1) Prefer JSON output (structured mode)
-        obj = try_parse_action_json(content) or self._try_parse_loose_json(content)
+        obj = try_parse_action_json(
+            content) or self._try_parse_loose_json(content)
         if obj:
             action = (obj.get("action") or "watch").strip()
             result["action"] = action
@@ -515,7 +528,8 @@ class IntradayMonitorAgent(BaseAgent):
                 "avoid",
             }
             result["triggers"] = (
-                obj.get("triggers") if isinstance(obj.get("triggers"), list) else []
+                obj.get("triggers") if isinstance(
+                    obj.get("triggers"), list) else []
             )
             result["invalidations"] = (
                 obj.get("invalidations")
@@ -595,7 +609,8 @@ class IntradayMonitorAgent(BaseAgent):
                 result["reason"] = clean_content[:100]
 
         # 最终 should_alert 判定：只在明确“建仓/加仓/减仓/清仓”时提醒
-        result["should_alert"] = result["action"] in {"buy", "add", "reduce", "sell"}
+        result["should_alert"] = result["action"] in {
+            "buy", "add", "reduce", "sell"}
         return result
 
     def _try_parse_loose_json(self, text: str) -> dict | None:
@@ -633,7 +648,8 @@ class IntradayMonitorAgent(BaseAgent):
             return None
 
         # 没有关键字段时不认为是建议 JSON
-        keys = {"action", "action_label", "signal", "reason", "triggers", "invalidations", "risks"}
+        keys = {"action", "action_label", "signal",
+                "reason", "triggers", "invalidations", "risks"}
         if not any(k in obj for k in keys):
             return None
         return obj
@@ -656,10 +672,12 @@ class IntradayMonitorAgent(BaseAgent):
             else []
         )
         risks = (
-            suggestion.get("risks") if isinstance(suggestion.get("risks"), list) else []
+            suggestion.get("risks") if isinstance(
+                suggestion.get("risks"), list) else []
         )
         price = (
-            f"{stock.current_price:.2f}" if getattr(stock, "current_price", None) else "N/A"
+            f"{stock.current_price:.2f}" if getattr(
+                stock, "current_price", None) else "N/A"
         )
         chg = f"{(stock.change_pct or 0):+.2f}%"
         lines = [
@@ -723,11 +741,13 @@ class IntradayMonitorAgent(BaseAgent):
             "%Y-%m-%d"
         )
         quality_score = (
-            (data.get("symbol_context") or {}).get("data_quality", {}).get("score")
+            (data.get("symbol_context") or {}).get(
+                "data_quality", {}).get("score")
         )
         # JSON/类 JSON 输出时，统一转换为可读通知文本，避免渠道直接推送原始 JSON
         if try_parse_action_json(raw_content) or self._try_parse_loose_json(raw_content):
-            content = self._format_human_readable_content(stock, suggestion, raw_content)
+            content = self._format_human_readable_content(
+                stock, suggestion, raw_content)
 
         # 保存到建议池（包含 prompt 上下文）
         save_suggestion(

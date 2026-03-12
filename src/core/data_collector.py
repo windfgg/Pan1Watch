@@ -205,7 +205,8 @@ class DataCollectorManager:
             collector = NewsCollector.from_database()
             news_list = await collector.fetch_all(symbols=symbols, since_hours=hours)
 
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
             self._log(
                 "新闻采集",
                 "news",
@@ -222,7 +223,8 @@ class DataCollectorManager:
                 duration_ms=duration_ms,
             )
         except Exception as e:
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
             self._log("新闻采集", "news", "error", str(e), duration_ms=duration_ms)
             return CollectorResult(success=False, error=str(e), duration_ms=duration_ms)
 
@@ -241,7 +243,8 @@ class DataCollectorManager:
             collector = KlineCollector(market_code)
             summary = collector.get_kline_summary(symbol)
 
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
 
             if summary.get("error"):
                 self._log(
@@ -270,8 +273,10 @@ class DataCollectorManager:
                 duration_ms=duration_ms,
             )
         except Exception as e:
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-            self._log("K线数据", "kline", "error", str(e), duration_ms=duration_ms)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
+            self._log("K线数据", "kline", "error",
+                      str(e), duration_ms=duration_ms)
             return CollectorResult(success=False, error=str(e), duration_ms=duration_ms)
 
     async def collect_capital_flow(self, symbol: str) -> CollectorResult:
@@ -285,7 +290,8 @@ class DataCollectorManager:
             collector = CapitalFlowCollector(MarketCode.CN)
             data = collector.get_capital_flow(symbol)
 
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
 
             if not data:
                 self._log(
@@ -314,7 +320,8 @@ class DataCollectorManager:
                 duration_ms=duration_ms,
             )
         except Exception as e:
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
             self._log(
                 "资金流向", "capital_flow", "error", str(e), duration_ms=duration_ms
             )
@@ -331,7 +338,8 @@ class DataCollectorManager:
             collector = AkshareCollector(MarketCode.CN)
             stocks = await collector.get_stock_data(symbols)
 
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
             self._log(
                 "实时行情",
                 "quote",
@@ -348,8 +356,10 @@ class DataCollectorManager:
                 duration_ms=duration_ms,
             )
         except Exception as e:
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-            self._log("实时行情", "quote", "error", str(e), duration_ms=duration_ms)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
+            self._log("实时行情", "quote", "error",
+                      str(e), duration_ms=duration_ms)
             return CollectorResult(success=False, error=str(e), duration_ms=duration_ms)
 
     async def test_source(self, source: DataSource) -> CollectorResult:
@@ -369,7 +379,8 @@ class DataCollectorManager:
 
         try:
             result = await self._test_source_impl(source, test_symbols)
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
 
             if result.success:
                 self._log(
@@ -395,7 +406,8 @@ class DataCollectorManager:
             return result
 
         except Exception as e:
-            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            duration_ms = int(
+                (datetime.now() - start_time).total_seconds() * 1000)
             self._log(
                 source.name, source.type, "error", str(e), duration_ms=duration_ms
             )
@@ -430,7 +442,8 @@ class DataCollectorManager:
                 cookies = (source.config or {}).get("cookies", "")
                 collector = XueqiuNewsCollector(cookies=cookies)
             elif source.provider == "eastmoney_news":
-                collector = EastMoneyStockNewsCollector(symbol_names=symbol_names)
+                collector = EastMoneyStockNewsCollector(
+                    symbol_names=symbol_names)
             elif source.provider == "eastmoney":
                 collector = EastMoneyNewsCollector()
 
@@ -438,7 +451,10 @@ class DataCollectorManager:
                 news = await collector.fetch_news(symbols=test_symbols, since=since)
                 error_msg = ""
                 if len(news) == 0:
-                    if source.provider == "xueqiu":
+                    # 优先使用 collector 自身的错误信息
+                    if hasattr(collector, 'last_error') and collector.last_error:
+                        error_msg = collector.last_error
+                    elif source.provider == "xueqiu":
                         error_msg = "无数据，请检查 cookie 是否有效"
                     elif source.provider == "eastmoney_news" and not symbol_names:
                         error_msg = "未找到测试股票的名称，请先添加自选股"
@@ -505,6 +521,30 @@ class DataCollectorManager:
             )
 
         elif source.type == "quote":
+            if source.provider == "eastmoney_fund":
+                from src.collectors.akshare_collector import _fetch_fund_quotes
+
+                fund_ids = [
+                    str(x).strip().zfill(6)
+                    for x in test_symbols[:5]
+                    if str(x).strip()
+                ]
+                rows = _fetch_fund_quotes(fund_ids)
+                return CollectorResult(
+                    success=len(rows) > 0,
+                    data=[
+                        {
+                            "symbol": r.get("symbol"),
+                            "name": r.get("name"),
+                            "price": r.get("current_price"),
+                            "change_pct": r.get("change_pct"),
+                        }
+                        for r in rows
+                    ],
+                    count=len(rows),
+                    error="" if rows else "获取基金估值失败",
+                )
+
             from src.collectors.akshare_collector import AkshareCollector
 
             collector = AkshareCollector(MarketCode.CN)

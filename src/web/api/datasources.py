@@ -84,7 +84,8 @@ def list_datasources(type: str | None = None, db: Session = Depends(get_db)):
     query = db.query(DataSource)
     if type:
         query = query.filter(DataSource.type == type)
-    sources = query.order_by(DataSource.type, DataSource.priority, DataSource.id).all()
+    sources = query.order_by(
+        DataSource.type, DataSource.priority, DataSource.id).all()
     return [_to_response(s) for s in sources]
 
 
@@ -169,7 +170,7 @@ async def test_datasource(source_id: int, db: Session = Depends(get_db)):
     result = await manager.test_source(source)
 
     return {
-        "success": result.success,
+        "passed": result.success,
         "source_name": source.name,
         "source_type": source.type,
         "type_label": TYPE_LABELS.get(source.type, source.type),

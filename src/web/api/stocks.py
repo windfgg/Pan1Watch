@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+import time
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,12 +19,22 @@ from src.web.models import (
     PriceAlertHit,
 )
 from src.web.stock_list import search_stocks, refresh_stock_list
-from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
+from src.collectors.akshare_collector import (
+    _tencent_symbol,
+    _fetch_tencent_quotes,
+    _fetch_fund_quotes,
+)
+from src.collectors.fund_collector import (
+    fetch_fund_top_holdings,
+    fetch_fund_performance,
+)
 from src.models.market import MarketCode, MARKETS
 from src.core.agent_catalog import AGENT_KIND_WORKFLOW, infer_agent_kind
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_FUND_OVERVIEW_CACHE: dict[str, tuple[float, dict]] = {}
+_FUND_OVERVIEW_CACHE_TTL = 15 * 60
 
 
 class StockCreate(BaseModel):
@@ -109,7 +120,8 @@ def get_market_status():
             # 获取交易时段描述
             sessions_desc = []
             for session in market_def.sessions:
-                sessions_desc.append(f"{session.start.strftime('%H:%M')}-{session.end.strftime('%H:%M')}")
+                sessions_desc.append(
+                    f"{session.start.strftime('%H:%M')}-{session.end.strftime('%H:%M')}")
 
             # 判断状态
             weekday = now.weekday()
@@ -171,14 +183,22 @@ def search(q: str = Query("", min_length=1), market: str = Query("")):
 
 @router.post("/refresh-list")
 def refresh_list():
-    """刷新股票列表缓存"""
+    """刷新标的列表缓存（区分股票与基金）"""
     stocks = refresh_stock_list()
-    return {"count": len(stocks)}
+    fund_count = sum(1 for item in stocks if str(
+        item.get("market", "")).upper() == "FUND")
+    stock_count = len(stocks) - fund_count
+    return {
+        "count": len(stocks),
+        "stock_count": stock_count,
+        "fund_count": fund_count,
+    }
 
 
 @router.get("", response_model=list[StockResponse])
 def list_stocks(db: Session = Depends(get_db)):
-    stocks = db.query(Stock).order_by(Stock.sort_order.asc(), Stock.id.asc()).all()
+    stocks = db.query(Stock).order_by(
+        Stock.sort_order.asc(), Stock.id.asc()).all()
     return [_stock_to_response(s) for s in stocks]
 
 
@@ -196,6 +216,21 @@ def get_quotes(db: Session = Depends(get_db)):
 
     quotes = {}
     for market, stock_list in market_stocks.items():
+        if str(market).upper() == "FUND":
+            symbols = [s.symbol for s in stock_list]
+            try:
+                items = _fetch_fund_quotes(symbols)
+                for item in items:
+                    quotes[item["symbol"]] = {
+                        "current_price": item["current_price"],
+                        "change_pct": item["change_pct"],
+                        "change_amount": item["change_amount"],
+                        "prev_close": item["prev_close"],
+                    }
+            except Exception as e:
+                logger.error(f"获取 {market} 基金估值失败: {e}")
+            continue
+
         try:
             market_code = MarketCode(market)
         except ValueError:
@@ -215,6 +250,37 @@ def get_quotes(db: Session = Depends(get_db)):
             logger.error(f"获取 {market} 行情失败: {e}")
 
     return quotes
+
+
+@router.get("/funds/{fund_code}/overview")
+def get_fund_overview(fund_code: str):
+    """获取基金详情：重仓前10与业绩走势"""
+    code = (fund_code or "").strip()
+    if not code:
+        raise HTTPException(400, "基金代码不能为空")
+
+    now = time.time()
+    cached = _FUND_OVERVIEW_CACHE.get(code)
+    if cached and now - cached[0] < _FUND_OVERVIEW_CACHE_TTL:
+        return cached[1]
+
+    try:
+        holdings = fetch_fund_top_holdings(code, topline=10)
+        perf = fetch_fund_performance(code)
+
+        payload = {
+            "fund_code": code,
+            "top_holdings": holdings,
+            "performance": perf,
+            "updated_at": int(now * 1000),
+        }
+        _FUND_OVERVIEW_CACHE[code] = (now, payload)
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("获取基金详情失败 %s", code)
+        raise HTTPException(502, f"获取基金详情失败: {e}")
 
 
 @router.post("", response_model=StockResponse)
@@ -272,7 +338,8 @@ def delete_stock(stock_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "股票不存在")
 
     # 删除股票前，要求先清理持仓，避免误删资产数据。
-    has_position = db.query(Position.id).filter(Position.stock_id == stock_id).first()
+    has_position = db.query(Position.id).filter(
+        Position.stock_id == stock_id).first()
     if has_position:
         raise HTTPException(400, "该股票存在持仓，请先删除持仓后再删除股票")
 
@@ -310,7 +377,8 @@ def update_stock_agents(stock_id: int, body: StockAgentUpdate, db: Session = Dep
         raise HTTPException(404, "股票不存在")
 
     for item in body.agents:
-        agent = db.query(AgentConfig).filter(AgentConfig.name == item.agent_name).first()
+        agent = db.query(AgentConfig).filter(
+            AgentConfig.name == item.agent_name).first()
         if not agent:
             raise HTTPException(400, f"Agent {item.agent_name} 不存在")
         agent_kind = (agent.kind or "").strip() or infer_agent_kind(agent.name)
@@ -369,7 +437,8 @@ async def trigger_stock_agent(
             raise HTTPException(400, f"股票未关联 Agent {agent_name}")
         if not sa and allow_unbound:
             # 允许无绑定触发时，至少确保 Agent 存在。
-            agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+            agent = db.query(AgentConfig).filter(
+                AgentConfig.name == agent_name).first()
             if not agent:
                 raise HTTPException(400, f"Agent {agent_name} 不存在")
         trigger_stock = db_stock
@@ -392,7 +461,8 @@ async def trigger_stock_agent(
             trigger_stock = db_stock
         else:
             # 不落库：用于详情弹窗未持仓且未关注股票的一次性分析。
-            agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+            agent = db.query(AgentConfig).filter(
+                AgentConfig.name == agent_name).first()
             if not agent:
                 raise HTTPException(400, f"Agent {agent_name} 不存在")
             trigger_stock = SimpleNamespace(
@@ -422,9 +492,11 @@ async def trigger_stock_agent(
                     bypass_market_hours=bypass_market_hours,
                     suppress_notify=suppress_notify,
                 ))
-                logger.info(f"Agent {agent_name} 后台执行完成 - {trigger_stock.symbol}")
+                logger.info(
+                    f"Agent {agent_name} 后台执行完成 - {trigger_stock.symbol}")
             except Exception:
-                logger.exception(f"Agent {agent_name} 后台执行失败 - {trigger_stock.symbol}")
+                logger.exception(
+                    f"Agent {agent_name} 后台执行失败 - {trigger_stock.symbol}")
 
         t = threading.Thread(
             target=_runner,

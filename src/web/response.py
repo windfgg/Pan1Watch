@@ -14,7 +14,13 @@ class ResponseWrapperMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] != "http" or not scope.get("path", "").startswith("/api/"):
+        path = scope.get("path", "")
+        if scope["type"] != "http" or not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        # MCP 走 JSON-RPC 标准格式，不能被统一响应包装。
+        if path.startswith("/api/mcp"):
             await self.app(scope, receive, send)
             return
 
@@ -60,7 +66,8 @@ class ResponseWrapperMiddleware:
                 success = bool(original_data.get("success"))
                 raw_code = original_data.get("code")
                 try:
-                    code = int(raw_code) if raw_code is not None else (0 if success else 1)
+                    code = int(raw_code) if raw_code is not None else (
+                        0 if success else 1)
                 except Exception:
                     code = 0 if success else 1
                 if success and code != 0:
@@ -91,9 +98,11 @@ class ResponseWrapperMiddleware:
                 }
             else:
                 # 默认 2xx 视为成功
-                wrapped = {"code": 0, "success": True, "data": original_data, "message": ""}
+                wrapped = {"code": 0, "success": True,
+                           "data": original_data, "message": ""}
         else:
-            detail = original_data.get("detail", original_data) if isinstance(original_data, dict) else original_data
+            detail = original_data.get("detail", original_data) if isinstance(
+                original_data, dict) else original_data
             code = status_code
             message: str
             if isinstance(detail, dict):
@@ -109,10 +118,12 @@ class ResponseWrapperMiddleware:
                     or json.dumps(detail, ensure_ascii=False)
                 )
             else:
-                message = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+                message = detail if isinstance(
+                    detail, str) else json.dumps(detail, ensure_ascii=False)
             if code == 0:
                 code = status_code if status_code != 0 else 1
-            wrapped = {"code": code, "success": False, "data": None, "message": message}
+            wrapped = {"code": code, "success": False,
+                       "data": None, "message": message}
 
         new_body = json.dumps(wrapped, ensure_ascii=False).encode()
 

@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.collectors.akshare_collector import _fetch_tencent_quotes, _tencent_symbol
+from src.collectors.akshare_collector import _fetch_tencent_quotes, _tencent_symbol, _fetch_fund_quotes
 from src.collectors.kline_collector import KlineCollector
 from src.core.notifier import NotifierManager
 from src.models.market import MarketCode, MARKETS
@@ -120,6 +120,22 @@ class PriceAlertEngine:
             symbols = [s.symbol for s in items]
             if not symbols:
                 continue
+
+            # 基金使用单独的估值接口
+            if market == MarketCode.FUND:
+                try:
+                    rows = await asyncio.to_thread(_fetch_fund_quotes, symbols)
+                except Exception as e:
+                    logger.error(f"价格提醒拉取基金估值失败: {e}")
+                    rows = []
+                by_symbol = {str(r.get("symbol")): r for r in rows}
+                for sym in symbols:
+                    q = by_symbol.get(sym)
+                    if q:
+                        out[(market.value, sym)] = q
+                continue
+
+            # 股票使用腾讯接口
             tencent_symbols = [_tencent_symbol(sym, market) for sym in symbols]
             try:
                 rows = await asyncio.to_thread(_fetch_tencent_quotes, tencent_symbols)
@@ -160,6 +176,12 @@ class PriceAlertEngine:
 
         if ctype == "price":
             left = _safe_float(quote.get("current_price"))
+        elif ctype == "nav_estimate":  # 基金估值净值（无估值时 fallback 到单位净值）
+            left = _safe_float(quote.get("current_price"))
+            if left is None:
+                left = _safe_float(quote.get("prev_close"))
+        elif ctype == "nav_unit":  # 基金单位净值（最新公布）
+            left = _safe_float(quote.get("prev_close"))
         elif ctype == "change_pct":
             left = _safe_float(quote.get("change_pct"))
         elif ctype == "turnover":
