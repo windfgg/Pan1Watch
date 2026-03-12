@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { dashboardApi, discoveryApi } from '@panwatch/api'
 import { useLocalStorage } from '@/lib/utils'
+import { useRefreshReceiver, useAutoRefreshProgress } from '@/hooks/use-global-refresh'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Switch } from '@panwatch/base-ui/components/ui/switch'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@panwatch/base-ui/components/ui/select'
@@ -215,6 +216,40 @@ const mergePortfolioQuotes = (
   }
 }
 
+function useAnimatedNumber(target: number, duration = 550) {
+  const [display, setDisplay] = useState(target)
+  const prevRef = useRef(target)
+
+  useEffect(() => {
+    const start = Number.isFinite(prevRef.current) ? prevRef.current : target
+    const end = Number.isFinite(target) ? target : 0
+    if (Math.abs(end - start) < 1e-9) {
+      setDisplay(end)
+      prevRef.current = end
+      return
+    }
+
+    let raf = 0
+    const t0 = performance.now()
+    const step = (ts: number) => {
+      const p = Math.min(1, (ts - t0) / duration)
+      const eased = 1 - Math.pow(1 - p, 3)
+      const next = start + (end - start) * eased
+      setDisplay(next)
+      if (p < 1) {
+        raf = requestAnimationFrame(step)
+      } else {
+        prevRef.current = end
+      }
+    }
+
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [target, duration])
+
+  return display
+}
+
 export default function DashboardPage() {
   const navigate = useNavigate()
 
@@ -228,14 +263,14 @@ export default function DashboardPage() {
   // Portfolio
   const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null)
   const [portfolioRaw, setPortfolioRaw] = useState<PortfolioSummary | null>(null)
-  const [portfolioLoading, setPortfolioLoading] = useState(false)
+  const [, setPortfolioLoading] = useState(false)
   const hasPortfolio = portfolio && portfolio.accounts.length > 0
 
   // Watchlist
   const [stocks, setStocks] = useState<Stock[]>([])
   // Keyed by `${market}:${symbol}` to avoid cross-market collisions
   const [quotes, setQuotes] = useState<QuoteMap>({})
-  const [quotesLoading, setQuotesLoading] = useState(false)
+  const [, setQuotesLoading] = useState(false)
   const hasWatchlist = stocks.length > 0
 
   // Unified stock insight modal
@@ -256,7 +291,11 @@ export default function DashboardPage() {
   const [refreshInterval, setRefreshInterval] = useLocalStorage('panwatch_dashboard_refreshInterval', 30)
   const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null)
   const [lastScanTime, setLastScanTime] = useState<Date | null>(null)
+  const [portfolioKpiFlashMap, setPortfolioKpiFlashMap] = useState<Record<string, { key: number; dir: 'up' | 'down' | 'neutral' }>>({})
+  const prevPortfolioKpiRef = useRef<Record<string, number>>({})
   const refreshTimerRef = useRef<ReturnType<typeof setInterval>>()
+  const progressTimerRef = useRef<ReturnType<typeof setInterval>>()
+  const setAutoRefreshProgress = useAutoRefreshProgress()
 
   // Onboarding
   const [showOnboarding, setShowOnboarding] = useState(false)
@@ -448,22 +487,43 @@ export default function DashboardPage() {
   useEffect(() => {
     if (autoRefresh) {
       refreshQuotes()
+      // 主刷新定时器
       refreshTimerRef.current = setInterval(() => {
         refreshQuotes()
       }, refreshInterval * 1000)
+      // 进度更新定时器
+      const startTime = Date.now()
+      const intervalMs = refreshInterval * 1000
+      const tick = () => {
+        const elapsed = Date.now() - startTime
+        const cycleElapsed = elapsed % intervalMs
+        const progress = 1 - cycleElapsed / intervalMs
+        setAutoRefreshProgress({ enabled: true, progress })
+      }
+      tick()
+      progressTimerRef.current = setInterval(tick, 100)
     } else {
       if (refreshTimerRef.current) {
         clearInterval(refreshTimerRef.current)
         refreshTimerRef.current = undefined
       }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current)
+        progressTimerRef.current = undefined
+      }
+      setAutoRefreshProgress({ enabled: false, progress: 0 })
     }
 
     return () => {
       if (refreshTimerRef.current) {
         clearInterval(refreshTimerRef.current)
       }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current)
+      }
+      setAutoRefreshProgress({ enabled: false, progress: 0 })
     }
-  }, [autoRefresh, refreshInterval, refreshQuotes])
+  }, [autoRefresh, refreshInterval, refreshQuotes, setAutoRefreshProgress])
 
   const loadAIInsights = async () => {
     setInsightsLoading(true)
@@ -620,6 +680,9 @@ export default function DashboardPage() {
     setLastRefreshTime(new Date())
   }
 
+  // 注册全局刷新回调
+  useRefreshReceiver(handleRefresh)
+
   const formatMoney = (value: number) => {
     if (Math.abs(value) >= 10000) {
       return `${(value / 10000).toFixed(2)}万`
@@ -677,6 +740,72 @@ export default function DashboardPage() {
       has_data: posCount > 0,
     }
   }, [portfolioRaw, quotes])
+
+  const kpiTargets = useMemo(() => {
+    const assets = portfolio?.total.total_assets ?? 0
+    const totalPnl = portfolio?.total.total_pnl ?? 0
+    const totalPnlPct = portfolio?.total.total_pnl_pct ?? 0
+    const marketValue = portfolio?.total.total_market_value ?? 0
+    const funds = portfolio?.total.available_funds ?? 0
+    const dayPnl = portfolioDayPnl?.day_pnl ?? 0
+    const dayPnlPct = portfolioDayPnl?.day_pnl_pct ?? 0
+    return { assets, totalPnl, totalPnlPct, marketValue, funds, dayPnl, dayPnlPct }
+  }, [portfolio, portfolioDayPnl])
+
+  const displayAssets = useAnimatedNumber(kpiTargets.assets)
+  const displayTotalPnl = useAnimatedNumber(kpiTargets.totalPnl)
+  const displayTotalPnlPct = useAnimatedNumber(kpiTargets.totalPnlPct)
+  const displayMarketValue = useAnimatedNumber(kpiTargets.marketValue)
+  const displayFunds = kpiTargets.funds
+  const displayDayPnl = useAnimatedNumber(kpiTargets.dayPnl)
+  const displayDayPnlPct = useAnimatedNumber(kpiTargets.dayPnlPct)
+
+  const flashClassByDir = (dir: 'up' | 'down' | 'neutral') => {
+    if (dir === 'up') return 'animate-highlight-fade-up'
+    if (dir === 'down') return 'animate-highlight-fade-down'
+    return 'animate-highlight-fade-neutral'
+  }
+
+  const getKpiFlashClass = (key: string) => {
+    const item = portfolioKpiFlashMap[key]
+    return item ? flashClassByDir(item.dir) : ''
+  }
+
+  const getKpiFlashKey = (key: string) => portfolioKpiFlashMap[key]?.key ?? 0
+
+  useEffect(() => {
+    if (!portfolio) {
+      prevPortfolioKpiRef.current = {}
+      return
+    }
+    const nextValues: Record<string, number> = {
+      assets: kpiTargets.assets,
+      totalPnl: kpiTargets.totalPnl,
+      marketValue: kpiTargets.marketValue,
+      dayPnl: kpiTargets.dayPnl,
+    }
+    const prev = prevPortfolioKpiRef.current
+    const updates: Record<string, { dir: 'up' | 'down' | 'neutral' }> = {}
+    for (const [k, v] of Object.entries(nextValues)) {
+      if (!(k in prev)) continue
+      const delta = v - prev[k]
+      const dir: 'up' | 'down' | 'neutral' = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral'
+      updates[k] = { dir }
+    }
+    if (Object.keys(updates).length > 0) {
+      setPortfolioKpiFlashMap(prevMap => {
+        const merged = { ...prevMap }
+        for (const [k, v] of Object.entries(updates)) {
+          merged[k] = {
+            key: (prevMap[k]?.key ?? 0) + 1,
+            dir: v.dir,
+          }
+        }
+        return merged
+      })
+    }
+    prevPortfolioKpiRef.current = nextValues
+  }, [portfolio, kpiTargets])
 
   const dayMovers = useMemo(() => {
     if (!portfolioRaw) {
@@ -843,7 +972,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 rounded-2xl bg-accent/20 border border-border/40">
               <div className="flex items-center gap-1 md:gap-1.5">
                 <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
-                <span className="text-[11px] md:text-[12px] text-muted-foreground hidden sm:inline">自动刷新</span>
+                <span className="text-[11px] md:text-[12px] text-muted-foreground">自动刷新</span>
                 {autoRefresh && (
                   <Select value={refreshInterval.toString()} onValueChange={v => setRefreshInterval(parseInt(v))}>
                     <SelectTrigger className="h-6 w-14 md:w-16 text-[10px] md:text-[11px] px-1.5 md:px-2">
@@ -858,20 +987,7 @@ export default function DashboardPage() {
                   </Select>
                 )}
               </div>
-              {lastRefreshTime && (
-                <>
-                  <div className="w-px h-4 bg-border hidden sm:block" />
-                  <span className="text-[9px] md:text-[10px] text-muted-foreground/60 hidden md:inline font-mono">
-                    {lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                  </span>
-                </>
-              )}
             </div>
-
-            <Button variant="secondary" size="sm" onClick={handleRefresh} disabled={quotesLoading || portfolioLoading} className="h-9 px-3">
-              <RefreshCw className={`w-4 h-4 ${quotesLoading || portfolioLoading ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">刷新</span>
-            </Button>
           </div>
         </div>
 
@@ -907,18 +1023,18 @@ export default function DashboardPage() {
 
       {/* Portfolio Summary Cards */}
       {hasPortfolio && (
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
-          <div className="card p-4">
+        <div id="portfolio-kpis" className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
+          <div key={`assets-${getKpiFlashKey('assets')}`} className={`card p-4 ${getKpiFlashClass('assets')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <PiggyBank className="w-4 h-4" />
               <span className="text-[12px]">总资产</span>
             </div>
             <div className="text-[20px] font-bold text-foreground font-mono">
-              {formatMoney(portfolio!.total.total_assets)}
+              {formatMoney(displayAssets)}
             </div>
           </div>
 
-          <div className="card p-4">
+          <div key={`pnl-${getKpiFlashKey('totalPnl')}`} className={`card p-4 ${getKpiFlashClass('totalPnl')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               {portfolio!.total.total_pnl >= 0 ? (
                 <ArrowUpRight className="w-4 h-4 text-rose-500" />
@@ -927,21 +1043,21 @@ export default function DashboardPage() {
               )}
               <span className="text-[12px]">总盈亏</span>
             </div>
-            <div className={`text-[20px] font-bold font-mono ${portfolio!.total.total_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
-              {portfolio!.total.total_pnl >= 0 ? '+' : ''}{formatMoney(portfolio!.total.total_pnl)}
+            <div className={`text-[20px] font-bold font-mono ${displayTotalPnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+              {displayTotalPnl >= 0 ? '+' : ''}{formatMoney(displayTotalPnl)}
               <span className="text-[13px] ml-1.5">
-                ({portfolio!.total.total_pnl_pct >= 0 ? '+' : ''}{portfolio!.total.total_pnl_pct.toFixed(2)}%)
+                ({displayTotalPnlPct >= 0 ? '+' : ''}{displayTotalPnlPct.toFixed(2)}%)
               </span>
             </div>
           </div>
 
-          <div className="card p-4">
+          <div key={`mv-${getKpiFlashKey('marketValue')}`} className={`card p-4 ${getKpiFlashClass('marketValue')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <TrendingUp className="w-4 h-4" />
               <span className="text-[12px]">持仓市值</span>
             </div>
             <div className="text-[20px] font-bold text-foreground font-mono">
-              {formatMoney(portfolio!.total.total_market_value)}
+              {formatMoney(displayMarketValue)}
             </div>
           </div>
 
@@ -951,23 +1067,23 @@ export default function DashboardPage() {
               <span className="text-[12px]">可用资金</span>
             </div>
             <div className="text-[20px] font-bold text-foreground font-mono">
-              {formatMoney(portfolio!.total.available_funds)}
+              {formatMoney(displayFunds)}
             </div>
           </div>
 
-          <div className="card p-4">
+          <div key={`day-${getKpiFlashKey('dayPnl')}`} className={`card p-4 ${getKpiFlashClass('dayPnl')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
-              {(portfolioDayPnl?.day_pnl ?? 0) >= 0 ? (
+              {displayDayPnl >= 0 ? (
                 <ArrowUpRight className="w-4 h-4 text-rose-500" />
               ) : (
                 <ArrowDownRight className="w-4 h-4 text-emerald-500" />
               )}
               <span className="text-[12px]">当日盈亏</span>
             </div>
-            <div className={`text-[20px] font-bold font-mono ${(portfolioDayPnl?.day_pnl ?? 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
-              {(portfolioDayPnl?.day_pnl ?? 0) >= 0 ? '+' : ''}{formatMoney(portfolioDayPnl?.day_pnl ?? 0)}
+            <div className={`text-[20px] font-bold font-mono ${displayDayPnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+              {displayDayPnl >= 0 ? '+' : ''}{formatMoney(displayDayPnl)}
               <span className="text-[13px] ml-1.5">
-                ({(portfolioDayPnl?.day_pnl_pct ?? 0) >= 0 ? '+' : ''}{(portfolioDayPnl?.day_pnl_pct ?? 0).toFixed(2)}%)
+                ({displayDayPnlPct >= 0 ? '+' : ''}{displayDayPnlPct.toFixed(2)}%)
               </span>
             </div>
             {!portfolioDayPnl?.has_data && (
@@ -1013,62 +1129,9 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Market Indices */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2">
-            <BarChart3 className="w-4 h-4 text-primary" />
-            大盘指数
-          </h2>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          {indicesLoading ? (
-            Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="card p-3 animate-pulse">
-                <div className="h-4 bg-accent/50 rounded w-16 mb-2" />
-                <div className="h-6 bg-accent/50 rounded w-20 mb-1" />
-                <div className="h-3 bg-accent/30 rounded w-12" />
-              </div>
-            ))
-          ) : (
-            indices.map(idx => {
-              const isUp = idx.change_pct !== null && idx.change_pct > 0
-              const isDown = idx.change_pct !== null && idx.change_pct < 0
-              const changeColor = isUp ? 'text-rose-500' : isDown ? 'text-emerald-500' : 'text-muted-foreground'
-              const bgColor = isUp ? 'bg-rose-500/5' : isDown ? 'bg-emerald-500/5' : 'bg-accent/30'
-
-              return (
-                <div key={idx.symbol} className={`card p-3 ${bgColor} border-0`}>
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <span className={`text-[9px] px-1 py-0.5 rounded ${marketBadge(idx.market).style}`}>
-                      {marketBadge(idx.market).label}
-                    </span>
-                    <span className="text-[12px] text-muted-foreground">{idx.name}</span>
-                  </div>
-                  <div className={`text-[18px] font-bold font-mono ${changeColor}`}>
-                    {formatIndexPrice(idx.current_price)}
-                  </div>
-                  <div className={`text-[12px] font-mono ${changeColor}`}>
-                    {idx.change_pct !== null ? (
-                      <>
-                        {isUp ? '+' : ''}{idx.change_pct.toFixed(2)}%
-                        <span className="ml-1.5 opacity-60">
-                          {isUp ? '+' : ''}{idx.change_amount?.toFixed(2)}
-                        </span>
-                      </>
-                    ) : (
-                      '--'
-                    )}
-                  </div>
-                </div>
-              )
-            })
-          )}
-        </div>
-      </div>
-
+      <div className="grid grid-cols-1 2xl:grid-cols-12 gap-6 mb-6">
       {/* Discover */}
-      <div className="mb-6">
+      <div id="discover" className="2xl:col-span-8">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2">
             <Layers className="w-4 h-4 text-primary" />
@@ -1242,6 +1305,61 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Market Indices */}
+      <div id="market-indices" className="2xl:col-span-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2">
+            <BarChart3 className="w-4 h-4 text-primary" />
+            大盘指数
+          </h2>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 2xl:grid-cols-2 gap-3">
+          {indicesLoading ? (
+            Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="card p-3 animate-pulse">
+                <div className="h-4 bg-accent/50 rounded w-16 mb-2" />
+                <div className="h-6 bg-accent/50 rounded w-20 mb-1" />
+                <div className="h-3 bg-accent/30 rounded w-12" />
+              </div>
+            ))
+          ) : (
+            indices.map(idx => {
+              const isUp = idx.change_pct !== null && idx.change_pct > 0
+              const isDown = idx.change_pct !== null && idx.change_pct < 0
+              const changeColor = isUp ? 'text-rose-500' : isDown ? 'text-emerald-500' : 'text-muted-foreground'
+              const bgColor = isUp ? 'bg-rose-500/5' : isDown ? 'bg-emerald-500/5' : 'bg-accent/30'
+
+              return (
+                <div key={idx.symbol} className={`card p-3 ${bgColor} border-0`}>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className={`text-[9px] px-1 py-0.5 rounded ${marketBadge(idx.market).style}`}>
+                      {marketBadge(idx.market).label}
+                    </span>
+                    <span className="text-[12px] text-muted-foreground">{idx.name}</span>
+                  </div>
+                  <div className={`text-[18px] font-bold font-mono ${changeColor}`}>
+                    {formatIndexPrice(idx.current_price)}
+                  </div>
+                  <div className={`text-[12px] font-mono ${changeColor}`}>
+                    {idx.change_pct !== null ? (
+                      <>
+                        {isUp ? '+' : ''}{idx.change_pct.toFixed(2)}%
+                        <span className="ml-1.5 opacity-60">
+                          {isUp ? '+' : ''}{idx.change_amount?.toFixed(2)}
+                        </span>
+                      </>
+                    ) : (
+                      '--'
+                    )}
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
+      </div>
+      </div>
+
       <Dialog open={boardDialogOpen} onOpenChange={setBoardDialogOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
@@ -1295,7 +1413,7 @@ export default function DashboardPage() {
       </Dialog>
 
       {/* Action Center */}
-      <div className="mb-6">
+      <div id="action-center" className="mb-6">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[15px] font-semibold text-foreground flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-primary" />
