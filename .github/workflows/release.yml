@@ -20,7 +20,7 @@ on:
         description: "Target platforms"
         required: false
         type: string
-        default: "linux/amd64,linux/arm64"
+        default: "linux/amd64"
 
 env:
   REGISTRY: ghcr.io
@@ -51,7 +51,7 @@ jobs:
           else
             version="${{ github.ref_name }}"
             push_latest="true"
-            platforms="linux/amd64,linux/arm64"
+            platforms="linux/amd64"
           fi
 
           version_no_v="$version"
