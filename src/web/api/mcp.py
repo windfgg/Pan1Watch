@@ -870,6 +870,8 @@ def _account_to_dict(account: Account) -> dict[str, Any]:
     return {
         "id": account.id,
         "name": account.name,
+        "market": str(getattr(account, "market", "CN") or "CN").upper(),
+        "base_currency": str(getattr(account, "base_currency", "CNY") or "CNY").upper(),
         "available_funds": account.available_funds,
         "enabled": account.enabled,
     }
@@ -888,8 +890,27 @@ def _create_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     _require_args(arguments, ["name"])
     name = str(arguments["name"]).strip()
     available_funds = float(arguments.get("available_funds", 0) or 0)
+    market = str(arguments.get("market", "CN") or "CN").upper()
+    base_currency = str(arguments.get("base_currency", "CNY") or "CNY").upper()
+    if market not in {"CN", "HK", "US"}:
+        raise McpToolError(
+            error_code=ERR_INVALID_ARGS,
+            message="market 仅支持 CN/HK/US",
+            hint="请传入 market=CN/HK/US",
+        )
+    if base_currency not in {"CNY", "HKD", "USD"}:
+        raise McpToolError(
+            error_code=ERR_INVALID_ARGS,
+            message="base_currency 仅支持 CNY/HKD/USD",
+            hint="请传入 base_currency=CNY/HKD/USD",
+        )
 
-    account = Account(name=name, available_funds=available_funds)
+    account = Account(
+        name=name,
+        available_funds=available_funds,
+        market=market,
+        base_currency=base_currency,
+    )
     db.add(account)
     db.commit()
     db.refresh(account)
@@ -911,6 +932,24 @@ def _update_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         account.name = str(arguments["name"]).strip()
     if "available_funds" in arguments:
         account.available_funds = float(arguments["available_funds"])
+    if "market" in arguments:
+        market = str(arguments["market"] or "CN").upper()
+        if market not in {"CN", "HK", "US"}:
+            raise McpToolError(
+                error_code=ERR_INVALID_ARGS,
+                message="market 仅支持 CN/HK/US",
+                hint="请传入 market=CN/HK/US",
+            )
+        account.market = market
+    if "base_currency" in arguments:
+        base_currency = str(arguments["base_currency"] or "CNY").upper()
+        if base_currency not in {"CNY", "HKD", "USD"}:
+            raise McpToolError(
+                error_code=ERR_INVALID_ARGS,
+                message="base_currency 仅支持 CNY/HKD/USD",
+                hint="请传入 base_currency=CNY/HKD/USD",
+            )
+        account.base_currency = base_currency
     if "enabled" in arguments:
         account.enabled = bool(arguments["enabled"])
 
@@ -2534,12 +2573,14 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["name"],
             "properties": {
                 "name": {"type": "string", "description": "账户名称。"},
+                "market": {"type": "string", "default": "CN", "description": "账户市场：CN/HK/US。"},
+                "base_currency": {"type": "string", "default": "CNY", "description": "账户币种：CNY/HKD/USD。"},
                 "available_funds": {"type": "number", "default": 0, "description": "可用资金。"},
             },
             "additionalProperties": False,
         },
         "outputSchema": {"type": "object", "description": "新创建的账户对象。"},
-        "examples": [{"title": "创建账户", "arguments": {"name": "主账户", "available_funds": 100000}}],
+        "examples": [{"title": "创建账户", "arguments": {"name": "主账户", "market": "CN", "base_currency": "CNY", "available_funds": 100000}}],
     },
     {
         "name": "accounts.update",
@@ -2555,6 +2596,8 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "account_id": {"type": "integer", "description": "账户 ID。"},
                 "name": {"type": "string", "description": "新的账户名称。"},
+                "market": {"type": "string", "description": "账户市场：CN/HK/US。"},
+                "base_currency": {"type": "string", "description": "账户币种：CNY/HKD/USD。"},
                 "available_funds": {"type": "number", "description": "新的可用资金。"},
                 "enabled": {"type": "boolean", "description": "是否启用。"},
             },

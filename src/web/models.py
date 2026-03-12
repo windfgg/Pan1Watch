@@ -68,6 +68,8 @@ class Account(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)  # 账户名称，如 "招商证券"、"华泰证券"
+    market = Column(String, nullable=False, default="CN")  # CN / HK / US
+    base_currency = Column(String, nullable=False, default="CNY")  # CNY / HKD / USD
     available_funds = Column(Float, default=0)  # 可用资金
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())

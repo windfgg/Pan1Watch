@@ -48,6 +48,8 @@ interface Stock {
 interface Account {
   id: number
   name: string
+  market: string
+  base_currency: string
   available_funds: number
   enabled: boolean
 }
@@ -63,41 +65,57 @@ interface Position {
   quantity: number
   invested_amount: number | null
   trading_style: string  // short: 短线, swing: 波段, long: 长线
+  currency?: string
   current_price: number | null
+  current_price_display?: number | null
   current_price_cny: number | null  // 人民币价格（港股换算后）
   change_pct: number | null
   market_value: number | null
+  market_value_display?: number | null
   market_value_cny: number | null  // 人民币市值
   pnl: number | null
   pnl_pct: number | null
+  day_pnl?: number | null
+  day_pnl_pct?: number | null
   exchange_rate: number | null  // 汇率（仅港股）
 }
 
 interface AccountSummary {
   id: number
   name: string
+  market: string
+  base_currency: string
+  display_currency?: string
   available_funds: number
+  available_funds_native?: number
   total_market_value: number
   total_cost: number
   total_pnl: number
   total_pnl_pct: number
+  day_pnl?: number
+  day_pnl_pct?: number
   total_assets: number
   positions: Position[]
 }
 
 interface PortfolioSummary {
+  display_currency?: string
   accounts: AccountSummary[]
   total: {
     total_market_value: number
     total_cost: number
     total_pnl: number
     total_pnl_pct: number
+    day_pnl?: number
+    day_pnl_pct?: number
     available_funds: number
     total_assets: number
+    display_currency?: string
   }
   exchange_rates?: {
     HKD_CNY: number
     USD_CNY?: number
+    rates_to_cny?: Record<string, number>
   }
   quotes?: Record<string, { current_price: number | null; change_pct: number | null }>
 }
@@ -150,6 +168,8 @@ interface StockForm {
 
 interface AccountForm {
   name: string
+  market: string
+  base_currency: string
   available_funds: string
 }
 
@@ -223,9 +243,35 @@ interface PriceAlertRuleSummary {
 }
 
 const emptyStockForm: StockForm = { symbol: '', name: '', market: 'CN' }
-const emptyAccountForm: AccountForm = { name: '', available_funds: '0' }
+const emptyAccountForm: AccountForm = { name: '', market: 'CN', base_currency: 'CNY', available_funds: '0' }
 
 const round2 = (value: number) => Math.round(value * 100) / 100
+type AccountSortKey = 'name' | 'total_assets' | 'total_pnl' | 'day_pnl' | 'total_market_value' | 'available_funds'
+type SortDirection = 'asc' | 'desc'
+type PositionSortKey = 'sort_order' | 'name' | 'current_price' | 'change_pct' | 'day_pnl' | 'cost_price' | 'quantity' | 'market_value' | 'pnl'
+type PositionColumnKey = Exclude<PositionSortKey, 'sort_order'>
+
+const POSITION_COLUMN_DEFAULT_ORDER: PositionColumnKey[] = [
+  'name',
+  'current_price',
+  'change_pct',
+  'day_pnl',
+  'cost_price',
+  'quantity',
+  'market_value',
+  'pnl',
+]
+
+const POSITION_COLUMN_META: Record<PositionColumnKey, { label: string; align: 'text-left' | 'text-right' }> = {
+  name: { label: '名称', align: 'text-left' },
+  current_price: { label: '现价', align: 'text-right' },
+  change_pct: { label: '涨跌', align: 'text-right' },
+  day_pnl: { label: '今日盈亏', align: 'text-right' },
+  cost_price: { label: '成本', align: 'text-right' },
+  quantity: { label: '持仓', align: 'text-right' },
+  market_value: { label: '市值', align: 'text-right' },
+  pnl: { label: '盈亏', align: 'text-right' },
+}
 
 const mergePortfolioQuotes = (
   portfolio: PortfolioSummary | null,
@@ -233,66 +279,117 @@ const mergePortfolioQuotes = (
 ): PortfolioSummary | null => {
   if (!portfolio) return null
 
-  const hkdRate = portfolio.exchange_rates?.HKD_CNY ?? 0.92
-  const usdRate = portfolio.exchange_rates?.USD_CNY ?? 7.25
+  const displayCurrency = (portfolio.display_currency || portfolio.total.display_currency || 'CNY').toUpperCase()
+  const ratesToCny: Record<string, number> = {
+    CNY: 1,
+    HKD: portfolio.exchange_rates?.HKD_CNY ?? 0.92,
+    USD: portfolio.exchange_rates?.USD_CNY ?? 7.25,
+    ...(portfolio.exchange_rates?.rates_to_cny || {}),
+  }
+  const convertAmount = (amount: number, from: string, to: string) => {
+    const src = (from || 'CNY').toUpperCase()
+    const dst = (to || 'CNY').toUpperCase()
+    if (src === dst) return amount
+    const srcToCny = ratesToCny[src] ?? 1
+    const dstToCny = ratesToCny[dst] ?? 1
+    if (!dstToCny) return amount
+    return (amount * srcToCny) / dstToCny
+  }
 
   let grandMarketValue = 0
   let grandCost = 0
   let grandAvailable = 0
+  let grandDayPnl = 0
+  let grandPrevMv = 0
 
   const accounts = portfolio.accounts.map(account => {
     let accMarketValue = 0
     let accCost = 0
+    let accDayPnl = 0
+    let accPrevMv = 0
 
     const positions = account.positions.map(pos => {
       const quote = quotes[`${pos.market}:${pos.symbol}`]
       const current_price = quote?.current_price ?? pos.current_price ?? null
       const change_pct = quote?.change_pct ?? pos.change_pct ?? null
-      const rate = pos.market === 'HK' ? hkdRate : pos.market === 'US' ? usdRate : 1
+      const positionCurrency = (pos.currency || (pos.market === 'HK' ? 'HKD' : pos.market === 'US' ? 'USD' : 'CNY')).toUpperCase()
 
-      const cost = pos.cost_price * pos.quantity * rate
+      const cost = convertAmount(pos.cost_price * pos.quantity, positionCurrency, displayCurrency)
       accCost += cost
 
       let market_value: number | null = null
-      let market_value_cny: number | null = null
+      let market_value_display: number | null = null
       let pnl: number | null = null
       let pnl_pct: number | null = null
+      let day_pnl: number | null = null
+      let day_pnl_pct: number | null = null
 
       if (current_price != null) {
         market_value = current_price * pos.quantity
-        market_value_cny = market_value * rate
-        accMarketValue += market_value_cny
-        pnl = market_value_cny - cost
+        market_value_display = convertAmount(market_value, positionCurrency, displayCurrency)
+        accMarketValue += market_value_display
+        pnl = market_value_display - cost
         pnl_pct = cost > 0 ? (pnl / cost * 100) : 0
+
+        if (change_pct != null) {
+          const prevPrice = change_pct === -100 ? null : (current_price / (1 + change_pct / 100))
+          if (prevPrice != null && isFinite(prevPrice) && prevPrice > 0) {
+            const prevMarketValue = prevPrice * pos.quantity
+            const prevMarketValueDisplay = convertAmount(prevMarketValue, positionCurrency, displayCurrency)
+            day_pnl = market_value_display - prevMarketValueDisplay
+            day_pnl_pct = prevMarketValueDisplay > 0 ? (day_pnl / prevMarketValueDisplay * 100) : 0
+            accDayPnl += day_pnl
+            accPrevMv += prevMarketValueDisplay
+          }
+        }
       }
+
+      const current_price_display = current_price != null
+        ? convertAmount(current_price, positionCurrency, displayCurrency)
+        : null
 
       return {
         ...pos,
+        currency: positionCurrency,
         current_price,
-        current_price_cny: current_price != null ? current_price * rate : null,
+        current_price_display,
+        current_price_cny: current_price_display,
         change_pct,
         market_value,
-        market_value_cny,
+        market_value_display,
+        market_value_cny: market_value_display,
         pnl,
         pnl_pct,
-        exchange_rate: pos.market === 'HK' || pos.market === 'US' ? rate : null,
+        day_pnl,
+        day_pnl_pct,
+        exchange_rate: convertAmount(1, positionCurrency, displayCurrency),
       }
     })
 
     const accPnl = accMarketValue - accCost
     const accPnlPct = accCost > 0 ? (accPnl / accCost * 100) : 0
-    const accTotalAssets = accMarketValue + account.available_funds
+    const accDayPnlPct = accPrevMv > 0 ? (accDayPnl / accPrevMv * 100) : 0
+    const accountFundsNative = account.available_funds_native ?? account.available_funds
+    const accAvailable = convertAmount(accountFundsNative, account.base_currency || 'CNY', displayCurrency)
+    const accTotalAssets = accMarketValue + accAvailable
 
     grandMarketValue += accMarketValue
     grandCost += accCost
-    grandAvailable += account.available_funds
+    grandAvailable += accAvailable
+    grandDayPnl += accDayPnl
+    grandPrevMv += accPrevMv
 
     return {
       ...account,
+      display_currency: displayCurrency,
+      available_funds_native: accountFundsNative,
+      available_funds: round2(accAvailable),
       total_market_value: round2(accMarketValue),
       total_cost: round2(accCost),
       total_pnl: round2(accPnl),
       total_pnl_pct: round2(accPnlPct),
+      day_pnl: round2(accDayPnl),
+      day_pnl_pct: round2(accDayPnlPct),
       total_assets: round2(accTotalAssets),
       positions,
     }
@@ -300,18 +397,23 @@ const mergePortfolioQuotes = (
 
   const grandPnl = grandMarketValue - grandCost
   const grandPnlPct = grandCost > 0 ? (grandPnl / grandCost * 100) : 0
+  const grandDayPnlPct = grandPrevMv > 0 ? (grandDayPnl / grandPrevMv * 100) : 0
   const grandTotalAssets = grandMarketValue + grandAvailable
 
   return {
     ...portfolio,
+    display_currency: displayCurrency,
     accounts,
     total: {
       total_market_value: round2(grandMarketValue),
       total_cost: round2(grandCost),
       total_pnl: round2(grandPnl),
       total_pnl_pct: round2(grandPnlPct),
+      day_pnl: round2(grandDayPnl),
+      day_pnl_pct: round2(grandDayPnlPct),
       available_funds: round2(grandAvailable),
       total_assets: round2(grandTotalAssets),
+      display_currency: displayCurrency,
     },
   }
 }
@@ -329,6 +431,12 @@ export default function StocksPage() {
   const [portfolioRaw, setPortfolioRaw] = useState<PortfolioSummary | null>(null)
   const [portfolioLoading, setPortfolioLoading] = useState(false)
   const [expandedAccounts, setExpandedAccounts] = useState<Set<number>>(new Set())
+  const [accountSortKey, setAccountSortKey] = useLocalStorage<AccountSortKey>('panwatch_account_sort_key_v1', 'total_assets')
+  const [accountSortDirection, setAccountSortDirection] = useLocalStorage<SortDirection>('panwatch_account_sort_dir_v1', 'desc')
+  const [positionSortKey, setPositionSortKey] = useLocalStorage<PositionSortKey>('panwatch_position_sort_key_v1', 'sort_order')
+  const [positionSortDirection, setPositionSortDirection] = useLocalStorage<SortDirection>('panwatch_position_sort_dir_v1', 'asc')
+  const [positionColumnOrder, setPositionColumnOrder] = useLocalStorage<PositionColumnKey[]>('panwatch_position_column_order_v1', POSITION_COLUMN_DEFAULT_ORDER)
+  const [draggingPositionColumn, setDraggingPositionColumn] = useState<PositionColumnKey | null>(null)
 
   // Quotes for all stocks (used in stock list)
   const [quotes, setQuotes] = useState<Record<string, { current_price: number | null; change_pct: number | null }>>({})
@@ -339,6 +447,7 @@ export default function StocksPage() {
   // Auto-refresh (持久化到 localStorage)
   const [autoRefresh, setAutoRefresh] = useLocalStorage('panwatch_stocks_autoRefresh', false)
   const [refreshInterval, setRefreshInterval] = useLocalStorage('panwatch_stocks_refreshInterval', 30)
+  const [displayCurrency, setDisplayCurrency] = useLocalStorage<'CNY' | 'HKD' | 'USD'>('panwatch_stocks_display_currency', 'CNY')
   const [, setNextAutoRefreshAt] = useState<number | null>(null)
   const [, setAutoRefreshTick] = useState<number>(Date.now())
   const refreshTimerRef = useRef<ReturnType<typeof setInterval>>()
@@ -575,7 +684,7 @@ export default function StocksPage() {
     setPortfolioLoading(true)
     try {
       // 核心数据：仅本地账户/持仓
-      const portfolioData = await fetchAPI<PortfolioSummary>('/portfolio/summary?include_quotes=false')
+      const portfolioData = await fetchAPI<PortfolioSummary>(`/portfolio/summary?include_quotes=false&display_currency=${encodeURIComponent(displayCurrency)}`)
       setPortfolioRaw(portfolioData)
       setPortfolio(mergePortfolioQuotes(portfolioData, quotes))
 
@@ -592,6 +701,11 @@ export default function StocksPage() {
       setPortfolioLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (loading) return
+    loadPortfolio()
+  }, [displayCurrency])
 
   const buildQuoteItems = useCallback((): QuoteRequestItem[] => {
     const items: QuoteRequestItem[] = []
@@ -1083,7 +1197,12 @@ export default function StocksPage() {
   // ========== Account handlers ==========
   const openAccountDialog = (account?: Account) => {
     if (account) {
-      setAccountForm({ name: account.name, available_funds: account.available_funds.toString() })
+      setAccountForm({
+        name: account.name,
+        market: (account.market || 'CN').toUpperCase(),
+        base_currency: (account.base_currency || 'CNY').toUpperCase(),
+        available_funds: account.available_funds.toString(),
+      })
       setEditAccountId(account.id)
     } else {
       setAccountForm(emptyAccountForm)
@@ -1096,6 +1215,8 @@ export default function StocksPage() {
     try {
       const payload = {
         name: accountForm.name,
+        market: accountForm.market,
+        base_currency: accountForm.base_currency,
         available_funds: parseFloat(accountForm.available_funds) || 0,
       }
       if (editAccountId) {
@@ -1464,6 +1585,12 @@ export default function StocksPage() {
 
   const portfolioDayPnl = useMemo(() => {
     if (!portfolio) return { dayPnl: 0, pct: 0 }
+    if (portfolio.total.day_pnl != null) {
+      return {
+        dayPnl: Number(portfolio.total.day_pnl || 0),
+        pct: Number(portfolio.total.day_pnl_pct || 0),
+      }
+    }
     let dayPnl = 0
     let prevMv = 0
     const allPos = (portfolio.accounts || []).flatMap(a => a.positions || [])
@@ -1486,6 +1613,67 @@ export default function StocksPage() {
   const watchlistCount = useMemo(() => {
     return stocks.length
   }, [stocks])
+
+  const sortedAccounts = useMemo(() => {
+    const rows = [...(portfolio?.accounts || [])]
+    const factor = accountSortDirection === 'asc' ? 1 : -1
+    rows.sort((a, b) => {
+      if (accountSortKey === 'name') {
+        return a.name.localeCompare(b.name, 'zh-CN') * factor
+      }
+      const av = Number((a as any)[accountSortKey] ?? 0)
+      const bv = Number((b as any)[accountSortKey] ?? 0)
+      if (av === bv) {
+        return a.name.localeCompare(b.name, 'zh-CN')
+      }
+      return (av - bv) * factor
+    })
+    return rows
+  }, [portfolio?.accounts, accountSortDirection, accountSortKey])
+
+  const toggleAccountSort = useCallback((key: AccountSortKey) => {
+    if (accountSortKey === key) {
+      setAccountSortDirection(accountSortDirection === 'asc' ? 'desc' : 'asc')
+      return
+    }
+    setAccountSortKey(key)
+    setAccountSortDirection(key === 'name' ? 'asc' : 'desc')
+  }, [accountSortDirection, accountSortKey, setAccountSortDirection, setAccountSortKey])
+
+  const togglePositionSort = useCallback((key: PositionSortKey) => {
+    if (positionSortKey === key) {
+      setPositionSortDirection(positionSortDirection === 'asc' ? 'desc' : 'asc')
+      return
+    }
+    setPositionSortKey(key)
+    setPositionSortDirection(key === 'name' || key === 'sort_order' ? 'asc' : 'desc')
+  }, [positionSortDirection, positionSortKey, setPositionSortDirection, setPositionSortKey])
+
+  const effectivePositionColumnOrder = useMemo<PositionColumnKey[]>(() => {
+    const allowed = new Set<PositionColumnKey>(POSITION_COLUMN_DEFAULT_ORDER)
+    const current = Array.isArray(positionColumnOrder) ? positionColumnOrder : []
+    const picked: PositionColumnKey[] = []
+    for (const item of current) {
+      if (!allowed.has(item)) continue
+      if (picked.includes(item)) continue
+      picked.push(item)
+    }
+    for (const key of POSITION_COLUMN_DEFAULT_ORDER) {
+      if (!picked.includes(key)) picked.push(key)
+    }
+    return picked
+  }, [positionColumnOrder])
+
+  const movePositionColumn = useCallback((from: PositionColumnKey, to: PositionColumnKey) => {
+    if (from === to) return
+    const next = [...effectivePositionColumnOrder]
+    const fromIdx = next.indexOf(from)
+    const toIdx = next.indexOf(to)
+    if (fromIdx < 0 || toIdx < 0) return
+    const [moved] = next.splice(fromIdx, 1)
+    next.splice(toIdx, 0, moved)
+    setPositionColumnOrder(next)
+  }, [effectivePositionColumnOrder, setPositionColumnOrder])
 
   const flashClassByDir = (dir?: 'up' | 'down' | 'neutral') => {
     if (dir === 'up') return 'animate-highlight-fade-up'
@@ -1656,6 +1844,20 @@ export default function StocksPage() {
           <div className="hidden md:flex items-center gap-3">
             {/* Controls */}
             <div className="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 rounded-2xl bg-accent/20 border border-border/40">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] md:text-[12px] text-muted-foreground">展示</span>
+                <Select value={displayCurrency} onValueChange={v => setDisplayCurrency(v as 'CNY' | 'HKD' | 'USD')}>
+                  <SelectTrigger className="h-6 w-[70px] text-[10px] md:text-[11px] px-1.5 md:px-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="CNY">CNY</SelectItem>
+                    <SelectItem value="HKD">HKD</SelectItem>
+                    <SelectItem value="USD">USD</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="w-px h-4 bg-border" />
               <div className="flex items-center gap-1 md:gap-1.5">
                 <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
                 <span className="text-[11px] md:text-[12px] text-muted-foreground">自动刷新</span>
@@ -1673,21 +1875,6 @@ export default function StocksPage() {
                   </Select>
                 )}
               </div>
-              {(poolSuggestionsLoading || Object.keys(poolSuggestions).length > 0) && (
-                <>
-                  <div className="w-px h-4 bg-border" />
-                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    {poolSuggestionsLoading && (
-                      <span className="w-3 h-3 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-                    )}
-                    {!poolSuggestionsLoading && Object.keys(poolSuggestions).length > 0 && (
-                      <span className="text-[10px] text-primary">
-                        {Object.keys(poolSuggestions).length}
-                      </span>
-                    )}
-                  </div>
-                </>
-              )}
             </div>
             {/* Buttons */}
             <Button variant="secondary" onClick={scanAndReload} disabled={scanning}>
@@ -1716,6 +1903,20 @@ export default function StocksPage() {
         {/* Mobile Controls row */}
         <div className="flex md:hidden items-center gap-2 flex-wrap">
           <div className="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 rounded-2xl bg-accent/20 border border-border/40">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-muted-foreground">展示</span>
+              <Select value={displayCurrency} onValueChange={v => setDisplayCurrency(v as 'CNY' | 'HKD' | 'USD')}>
+                <SelectTrigger className="h-6 w-[70px] text-[10px] px-1.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="CNY">CNY</SelectItem>
+                  <SelectItem value="HKD">HKD</SelectItem>
+                  <SelectItem value="USD">USD</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="w-px h-4 bg-border" />
             <div className="flex items-center gap-1 md:gap-1.5">
               <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
               <span className="text-[11px] text-muted-foreground">自动刷新</span>
@@ -1760,7 +1961,9 @@ export default function StocksPage() {
           ))}
         </div>
       ) : portfolio ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+        <>
+          <div className="mb-2 text-[11px] text-muted-foreground">汇总展示币种: {portfolio.display_currency || portfolio.total.display_currency || 'CNY'}</div>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
           <div key={`mv-${getPortfolioKpiFlashKey('marketValue')}`} className={`card p-4 ${getPortfolioKpiFlashClass('marketValue')}`}>
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <TrendingUp className="w-4 h-4" />
@@ -1838,7 +2041,8 @@ export default function StocksPage() {
               {positionRatio ? `持仓市值 ${formatMoney(positionRatio.mv)} / 总资产 ${formatMoney(positionRatio.assets)}` : '—'}
             </div>
           </div>
-        </div>
+          </div>
+        </>
       ) : null}
 
       {/* Tabs: Positions / Watchlist */}
@@ -1973,7 +2177,75 @@ export default function StocksPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {portfolio?.accounts.map(account => (
+            <div className="card p-2 md:p-3">
+              <div className="hidden md:grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr] gap-2 text-[11px]">
+                {[
+                  { key: 'name', label: '账户名称' },
+                  { key: 'total_assets', label: '总资产' },
+                  { key: 'total_pnl', label: '总盈亏' },
+                  { key: 'day_pnl', label: '今日盈亏' },
+                  { key: 'available_funds', label: '可用资金' },
+                ].map((col) => {
+                  const active = accountSortKey === col.key
+                  return (
+                    <button
+                      key={col.key}
+                      type="button"
+                      onClick={() => toggleAccountSort(col.key as AccountSortKey)}
+                      className={`text-left px-2 py-1.5 rounded transition-colors ${active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/40'}`}
+                    >
+                      {col.label}{active ? (accountSortDirection === 'asc' ? ' ↑' : ' ↓') : ''}
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="md:hidden">
+                <Select
+                  value={`${accountSortKey}:${accountSortDirection}`}
+                  onValueChange={(v) => {
+                    const [k, d] = v.split(':')
+                    setAccountSortKey(k as AccountSortKey)
+                    setAccountSortDirection((d as SortDirection) || 'desc')
+                  }}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue placeholder="账户排序" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="total_assets:desc">总资产（高→低）</SelectItem>
+                    <SelectItem value="total_assets:asc">总资产（低→高）</SelectItem>
+                    <SelectItem value="total_pnl:desc">总盈亏（高→低）</SelectItem>
+                    <SelectItem value="total_pnl:asc">总盈亏（低→高）</SelectItem>
+                    <SelectItem value="day_pnl:desc">今日盈亏（高→低）</SelectItem>
+                    <SelectItem value="day_pnl:asc">今日盈亏（低→高）</SelectItem>
+                    <SelectItem value="available_funds:desc">可用资金（高→低）</SelectItem>
+                    <SelectItem value="available_funds:asc">可用资金（低→高）</SelectItem>
+                    <SelectItem value="name:asc">账户名称（A→Z）</SelectItem>
+                    <SelectItem value="name:desc">账户名称（Z→A）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {sortedAccounts.map(account => {
+                const sortedPositions = [...(account.positions || [])]
+                const factor = positionSortDirection === 'asc' ? 1 : -1
+                sortedPositions.sort((a, b) => {
+                  if (positionSortKey === 'sort_order') {
+                    return ((a.sort_order || 0) - (b.sort_order || 0)) * factor
+                  }
+                  if (positionSortKey === 'name') {
+                    return a.name.localeCompare(b.name, 'zh-CN') * factor
+                  }
+                  const av = Number((a as any)[positionSortKey] ?? Number.NEGATIVE_INFINITY)
+                  const bv = Number((b as any)[positionSortKey] ?? Number.NEGATIVE_INFINITY)
+                  if (av === bv) return a.name.localeCompare(b.name, 'zh-CN')
+                  return (av - bv) * factor
+                })
+                const dragEnabled = positionSortKey === 'sort_order'
+                const showNativeAvailableFunds = account.available_funds_native != null
+                  && (account.base_currency || 'CNY').toUpperCase() !== displayCurrency
+                return (
               <div key={account.id} className="card overflow-hidden">
               {/* Account Header */}
               <div
@@ -1988,26 +2260,42 @@ export default function StocksPage() {
                   )}
                   <Building2 className="w-4 h-4 text-primary" />
                   <span className="text-[14px] md:text-[15px] font-semibold text-foreground">{account.name}</span>
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">{marketLabel(account.market)}</Badge>
+                  <Badge variant="outline" className="text-[10px] px-1.5 py-0">{account.base_currency}</Badge>
                   <span className="text-[11px] md:text-[12px] text-muted-foreground">
                     {account.positions.length} 只
                   </span>
                 </div>
-                <div className="flex items-center justify-between md:justify-end gap-3 md:gap-6 pl-6 md:pl-0">
-                  <div className="flex items-center gap-3 md:gap-6">
-                    <div className="text-left md:text-right">
+                <div className="flex items-center justify-between md:justify-end gap-3 md:gap-4 pl-6 md:pl-0">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 md:gap-x-6 gap-y-2">
+                    <div className="text-left sm:text-right">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">市值</div>
                       <div className="text-[12px] md:text-[13px] font-mono font-medium">{formatMoney(account.total_market_value)}</div>
                     </div>
-                    <div className="text-left md:text-right">
+                    <div className="text-left sm:text-right">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">盈亏</div>
                       <div className={`text-[12px] md:text-[13px] font-mono font-medium ${account.total_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
                         {account.total_pnl >= 0 ? '+' : ''}{formatMoney(account.total_pnl)}
                         <span className="text-[10px] md:text-[11px] ml-1">({account.total_pnl_pct >= 0 ? '+' : ''}{account.total_pnl_pct.toFixed(2)}%)</span>
                       </div>
                     </div>
-                    <div className="text-left md:text-right hidden sm:block">
+                    <div className="text-left sm:text-right">
+                      <div className="text-[10px] md:text-[11px] text-muted-foreground">今日</div>
+                      <div className={`text-[12px] md:text-[13px] font-mono font-medium ${(account.day_pnl || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                        {(account.day_pnl || 0) >= 0 ? '+' : ''}{formatMoney(account.day_pnl || 0)}
+                        <span className="text-[10px] md:text-[11px] ml-1">({(account.day_pnl_pct || 0) >= 0 ? '+' : ''}{Number(account.day_pnl_pct || 0).toFixed(2)}%)</span>
+                      </div>
+                    </div>
+                    <div className="text-left sm:text-right">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">可用</div>
-                      <div className="text-[12px] md:text-[13px] font-mono">{formatMoney(account.available_funds)}</div>
+                      <div className="text-[12px] md:text-[13px] font-mono">
+                        {formatMoney(account.available_funds)}
+                        {showNativeAvailableFunds && (
+                          <span className="text-[10px] md:text-[11px] text-muted-foreground ml-1 align-middle">
+                            {account.available_funds_native!.toFixed(2)} {account.base_currency}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-0.5 md:gap-1" onClick={e => e.stopPropagation()}>
@@ -2036,20 +2324,45 @@ export default function StocksPage() {
                         <table className="w-full">
                           <thead>
                             <tr className="border-b border-border/30 bg-accent/20">
-                              <th className="text-left px-4 py-2 text-[11px] font-semibold text-muted-foreground">股票</th>
-                              <th className="text-right px-4 py-2 text-[11px] font-semibold text-muted-foreground">现价</th>
-                              <th className="text-right px-4 py-2 text-[11px] font-semibold text-muted-foreground">涨跌</th>
-                              <th className="text-right px-4 py-2 text-[11px] font-semibold text-muted-foreground">成本</th>
-                              <th className="text-right px-4 py-2 text-[11px] font-semibold text-muted-foreground">持仓</th>
-                              <th className="text-right px-4 py-2 text-[11px] font-semibold text-muted-foreground">市值</th>
-                              <th className="text-right px-4 py-2 text-[11px] font-semibold text-muted-foreground">盈亏</th>
+                              {effectivePositionColumnOrder.map((colKey) => {
+                                const col = POSITION_COLUMN_META[colKey]
+                                const active = positionSortKey === colKey
+                                return (
+                                  <th
+                                    key={colKey}
+                                    className={`px-4 py-2 text-[11px] font-semibold ${col.align}`}
+                                    draggable
+                                    onDragStart={() => setDraggingPositionColumn(colKey)}
+                                    onDragOver={(e) => {
+                                      e.preventDefault()
+                                      e.dataTransfer.dropEffect = 'move'
+                                    }}
+                                    onDrop={(e) => {
+                                      e.preventDefault()
+                                      if (draggingPositionColumn) {
+                                        movePositionColumn(draggingPositionColumn, colKey)
+                                      }
+                                      setDraggingPositionColumn(null)
+                                    }}
+                                    onDragEnd={() => setDraggingPositionColumn(null)}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => togglePositionSort(colKey as PositionSortKey)}
+                                      className={`inline-flex items-center gap-1 ${active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                                    >
+                                      {col.label}{active ? (positionSortDirection === 'asc' ? ' ↑' : ' ↓') : ''}
+                                    </button>
+                                  </th>
+                                )
+                              })}
                               <th className="text-center px-4 py-2 text-[11px] font-semibold text-muted-foreground">风格</th>
                               <th className="text-left px-4 py-2 text-[11px] font-semibold text-muted-foreground">Agent</th>
                               <th className="text-center px-4 py-2 text-[11px] font-semibold text-muted-foreground">操作</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {account.positions.map((pos, i) => {
+                            {sortedPositions.map((pos, i) => {
                               const stock = stocks.find(s => s.id === pos.stock_id)
                               const badge = marketBadge(pos.market)
                               const isForeign = pos.market === 'HK' || pos.market === 'US'
@@ -2062,14 +2375,16 @@ export default function StocksPage() {
                               return (
                                 <tr
                                   key={pos.id}
-                                  draggable
+                                  draggable={dragEnabled}
                                   onDragStart={(e) => {
+                                    if (!dragEnabled) return
                                     positionDragSnapshotRef.current = portfolioRaw ? JSON.parse(JSON.stringify(portfolioRaw)) : null
                                     setDraggingPositionId(pos.id)
                                     setDraggingPositionAccountId(account.id)
                                     e.dataTransfer.effectAllowed = 'move'
                                   }}
                                   onDragOver={(e) => {
+                                    if (!dragEnabled) return
                                     e.preventDefault()
                                     e.dataTransfer.dropEffect = 'move'
                                     if (draggingPositionId != null && draggingPositionAccountId === account.id) {
@@ -2077,6 +2392,7 @@ export default function StocksPage() {
                                     }
                                   }}
                                   onDrop={(e) => {
+                                    if (!dragEnabled) return
                                     e.preventDefault()
                                     if (draggingPositionId != null && draggingPositionAccountId === account.id) {
                                       commitPositionReorder(account.id)
@@ -2086,67 +2402,104 @@ export default function StocksPage() {
                                     positionDragSnapshotRef.current = null
                                   }}
                                   onDragEnd={() => {
+                                    if (!dragEnabled) return
                                     setDraggingPositionId(null)
                                     setDraggingPositionAccountId(null)
                                     positionDragSnapshotRef.current = null
                                   }}
                                   className={`group hover:bg-accent/30 transition-colors ${i > 0 ? 'border-t border-border/20' : ''} ${draggingPositionId === pos.id ? 'opacity-60' : ''}`}
                                 >
-                                  <td className="px-4 py-2.5">
-                                    <span className={`text-[9px] px-1 py-0.5 rounded mr-1.5 ${badge.style}`}>{badge.label}</span>
-                                    <span className="font-mono text-[12px] font-semibold text-foreground">
-                                      {pos.symbol}
-                                    </span>
-                                    <button
-                                      className="ml-1.5 text-[12px] text-muted-foreground hover:text-primary"
-                                      onClick={() => openStockDetail(pos.symbol, pos.market, pos.name, true)}
-                                    >
-                                      {pos.name}
-                                    </button>
-                                    {(() => {
-                                      const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
-                                      return (suggestion || kline) ? (
-                                        <span className="ml-2">
-                                          <SuggestionBadge
-                                            suggestion={suggestion}
-                                            stockName={pos.name}
-                                            stockSymbol={pos.symbol}
-                                            kline={kline}
-                                            market={pos.market}
-                                            hasPosition={true}
-                                          />
-                                        </span>
-                                      ) : null
-                                    })()}
-                                  </td>
-                                  <td className={`px-4 py-2.5 text-right font-mono text-[12px] ${changeColor}`}>
-                                    {pos.current_price != null ? <span>{pos.current_price.toFixed(2)}{isForeign ? (pos.market === 'HK' ? ' HKD' : ' USD') : ''}</span> : '—'}
-                                  </td>
-                                  <td className={`px-4 py-2.5 text-right font-mono text-[12px] ${changeColor}`}>
-                                    {pos.change_pct != null ? `${pos.change_pct >= 0 ? '+' : ''}${pos.change_pct.toFixed(2)}%` : '—'}
-                                  </td>
-                                  <td className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{formatPrice(pos.cost_price)}</td>
-                                  <td className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{pos.quantity}</td>
-                                  <td className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">
-                                    {pos.market_value != null ? (
-                                      <div className="flex flex-col items-end">
-                                        {isForeign ? (
-                                          <>
-                                            <span>{formatMoney(pos.market_value)} {pos.market === 'HK' ? 'HKD' : 'USD'}</span>
-                                            {pos.market_value_cny && <span className="text-[10px] text-muted-foreground/60">≈{formatMoney(pos.market_value_cny)}</span>}
-                                          </>
-                                        ) : <span>{formatMoney(pos.market_value)}</span>}
-                                      </div>
-                                    ) : '—'}
-                                  </td>
-                                  <td className={`px-4 py-2.5 text-right font-mono text-[12px] ${pnlColor}`}>
-                                    {pos.pnl != null ? (
-                                      <div className="flex flex-col items-end">
-                                        <span>{pos.pnl >= 0 ? '+' : ''}{formatMoney(pos.pnl)}</span>
-                                        <span className="text-[10px] opacity-70">{pos.pnl_pct != null ? `${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(2)}%` : ''}{isForeign && ' CNY'}</span>
-                                      </div>
-                                    ) : '—'}
-                                  </td>
+                                  {effectivePositionColumnOrder.map((colKey) => {
+                                    if (colKey === 'name') {
+                                      return (
+                                        <td key={`${pos.id}-name`} className="px-4 py-2.5">
+                                          <span className={`text-[9px] px-1 py-0.5 rounded mr-1.5 ${badge.style}`}>{badge.label}</span>
+                                          <span className="font-mono text-[12px] font-semibold text-foreground">
+                                            {pos.symbol}
+                                          </span>
+                                          <button
+                                            className="ml-1.5 text-[12px] text-muted-foreground hover:text-primary"
+                                            onClick={() => openStockDetail(pos.symbol, pos.market, pos.name, true)}
+                                          >
+                                            {pos.name}
+                                          </button>
+                                          {(() => {
+                                            const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
+                                            return (suggestion || kline) ? (
+                                              <span className="ml-2">
+                                                <SuggestionBadge
+                                                  suggestion={suggestion}
+                                                  stockName={pos.name}
+                                                  stockSymbol={pos.symbol}
+                                                  kline={kline}
+                                                  market={pos.market}
+                                                  hasPosition={true}
+                                                />
+                                              </span>
+                                            ) : null
+                                          })()}
+                                        </td>
+                                      )
+                                    }
+                                    if (colKey === 'current_price') {
+                                      return (
+                                        <td key={`${pos.id}-current_price`} className={`px-4 py-2.5 text-right font-mono text-[12px] ${changeColor}`}>
+                                          {pos.current_price != null ? <span>{pos.current_price.toFixed(2)}{isForeign ? (pos.market === 'HK' ? ' HKD' : ' USD') : ''}</span> : '—'}
+                                        </td>
+                                      )
+                                    }
+                                    if (colKey === 'change_pct') {
+                                      return (
+                                        <td key={`${pos.id}-change_pct`} className={`px-4 py-2.5 text-right font-mono text-[12px] ${changeColor}`}>
+                                          {pos.change_pct != null ? `${pos.change_pct >= 0 ? '+' : ''}${pos.change_pct.toFixed(2)}%` : '—'}
+                                        </td>
+                                      )
+                                    }
+                                    if (colKey === 'day_pnl') {
+                                      return (
+                                        <td key={`${pos.id}-day_pnl`} className={`px-4 py-2.5 text-right font-mono text-[12px] ${(pos.day_pnl || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                                          {pos.day_pnl != null ? (
+                                            <div className="flex flex-col items-end">
+                                              <span>{pos.day_pnl >= 0 ? '+' : ''}{formatMoney(pos.day_pnl)}</span>
+                                              <span className="text-[10px] opacity-70">{pos.day_pnl_pct != null ? `${pos.day_pnl_pct >= 0 ? '+' : ''}${pos.day_pnl_pct.toFixed(2)}%` : ''}</span>
+                                            </div>
+                                          ) : '—'}
+                                        </td>
+                                      )
+                                    }
+                                    if (colKey === 'cost_price') {
+                                      return <td key={`${pos.id}-cost_price`} className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{formatPrice(pos.cost_price)}</td>
+                                    }
+                                    if (colKey === 'quantity') {
+                                      return <td key={`${pos.id}-quantity`} className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{pos.quantity}</td>
+                                    }
+                                    if (colKey === 'market_value') {
+                                      return (
+                                        <td key={`${pos.id}-market_value`} className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">
+                                          {pos.market_value != null ? (
+                                            <div className="flex flex-col items-end">
+                                              {isForeign ? (
+                                                <>
+                                                  <span>{formatMoney(pos.market_value)} {pos.market === 'HK' ? 'HKD' : 'USD'}</span>
+                                                  {pos.market_value_cny && <span className="text-[10px] text-muted-foreground/60">≈{formatMoney(pos.market_value_cny)}</span>}
+                                                </>
+                                              ) : <span>{formatMoney(pos.market_value)}</span>}
+                                            </div>
+                                          ) : '—'}
+                                        </td>
+                                      )
+                                    }
+                                    return (
+                                      <td key={`${pos.id}-pnl`} className={`px-4 py-2.5 text-right font-mono text-[12px] ${pnlColor}`}>
+                                        {pos.pnl != null ? (
+                                          <div className="flex flex-col items-end">
+                                            <span>{pos.pnl >= 0 ? '+' : ''}{formatMoney(pos.pnl)}</span>
+                                            <span className="text-[10px] opacity-70">{pos.pnl_pct != null ? `${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(2)}%` : ''}{isForeign && ' CNY'}</span>
+                                          </div>
+                                        ) : '—'}
+                                      </td>
+                                    )
+                                  })}
                                   <td className="px-4 py-2.5 text-center">
                                     {pos.trading_style ? (
                                       <span className={`text-[10px] px-1.5 py-0.5 rounded ${pos.trading_style === 'short' ? 'bg-rose-500/10 text-rose-600' : pos.trading_style === 'long' ? 'bg-blue-500/10 text-blue-600' : 'bg-amber-500/10 text-amber-600'}`}>
@@ -2212,7 +2565,7 @@ export default function StocksPage() {
 
                       {/* Mobile Cards */}
                       <div className="md:hidden divide-y divide-border/30">
-                        {account.positions.map(pos => {
+                        {sortedPositions.map(pos => {
                           const stock = stocks.find(s => s.id === pos.stock_id)
                           const badge = marketBadge(pos.market)
                           const changeColor = pos.change_pct != null
@@ -2224,14 +2577,16 @@ export default function StocksPage() {
                           return (
                             <div
                               key={pos.id}
-                              draggable
+                              draggable={dragEnabled}
                               onDragStart={(e) => {
+                                if (!dragEnabled) return
                                 positionDragSnapshotRef.current = portfolioRaw ? JSON.parse(JSON.stringify(portfolioRaw)) : null
                                 setDraggingPositionId(pos.id)
                                 setDraggingPositionAccountId(account.id)
                                 e.dataTransfer.effectAllowed = 'move'
                               }}
                               onDragOver={(e) => {
+                                if (!dragEnabled) return
                                 e.preventDefault()
                                 e.dataTransfer.dropEffect = 'move'
                                 if (draggingPositionId != null && draggingPositionAccountId === account.id) {
@@ -2239,6 +2594,7 @@ export default function StocksPage() {
                                 }
                               }}
                               onDrop={(e) => {
+                                if (!dragEnabled) return
                                 e.preventDefault()
                                 if (draggingPositionId != null && draggingPositionAccountId === account.id) {
                                   commitPositionReorder(account.id)
@@ -2248,6 +2604,7 @@ export default function StocksPage() {
                                 positionDragSnapshotRef.current = null
                               }}
                               onDragEnd={() => {
+                                if (!dragEnabled) return
                                 setDraggingPositionId(null)
                                 setDraggingPositionAccountId(null)
                                 positionDragSnapshotRef.current = null
@@ -2296,6 +2653,7 @@ export default function StocksPage() {
                                 <div className="flex items-center gap-3">
                                   <span className="text-muted-foreground">成本 <span className="font-mono text-foreground">{formatPrice(pos.cost_price)}</span></span>
                                   <span className="text-muted-foreground">数量 <span className="font-mono text-foreground">{pos.quantity}</span></span>
+                                  <span className="text-muted-foreground">今日 <span className={`font-mono ${(pos.day_pnl || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>{pos.day_pnl != null ? `${pos.day_pnl >= 0 ? '+' : ''}${formatMoney(pos.day_pnl)}` : '—'}</span></span>
                                 </div>
                                 <div className={`font-mono ${pnlColor}`}>
                                   {pos.pnl != null ? `${pos.pnl >= 0 ? '+' : ''}${formatMoney(pos.pnl)}` : '—'}
@@ -2357,7 +2715,8 @@ export default function StocksPage() {
                 </div>
               )}
             </div>
-          ))}
+                )
+              })}
         </div>
         )
       )}
@@ -2438,7 +2797,7 @@ export default function StocksPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border/30 bg-accent/20">
-                    <th className="text-left px-3 py-2 text-[11px] font-semibold text-muted-foreground">股票</th>
+                    <th className="text-left px-3 py-2 text-[11px] font-semibold text-muted-foreground">名称</th>
                     <th className="text-right px-3 py-2 text-[11px] font-semibold text-muted-foreground">现价</th>
                     <th className="text-right px-3 py-2 text-[11px] font-semibold text-muted-foreground">涨跌</th>
                     <th className="text-left px-3 py-2 text-[11px] font-semibold text-muted-foreground hidden md:table-cell">Agent</th>
@@ -2821,8 +3180,43 @@ export default function StocksPage() {
                 placeholder="如：招商证券、华泰证券"
               />
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>账户市场</Label>
+                <Select
+                  value={accountForm.market}
+                  onValueChange={v => {
+                    const market = (v || 'CN').toUpperCase()
+                    const defaultCurrency = market === 'HK' ? 'HKD' : market === 'US' ? 'USD' : 'CNY'
+                    setAccountForm({ ...accountForm, market, base_currency: defaultCurrency })
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="CN">A股</SelectItem>
+                    <SelectItem value="HK">港股</SelectItem>
+                    <SelectItem value="US">美股</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>账户币种</Label>
+                <Select value={accountForm.base_currency} onValueChange={v => setAccountForm({ ...accountForm, base_currency: (v || 'CNY').toUpperCase() })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="CNY">CNY</SelectItem>
+                    <SelectItem value="HKD">HKD</SelectItem>
+                    <SelectItem value="USD">USD</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
             <div>
-              <Label>可用资金（元）</Label>
+              <Label>可用资金（{accountForm.base_currency}）</Label>
               <Input
                 value={accountForm.available_funds}
                 onChange={e => setAccountForm({ ...accountForm, available_funds: e.target.value })}

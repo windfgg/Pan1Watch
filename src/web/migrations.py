@@ -1394,6 +1394,94 @@ WHERE source_pool = 'market_scan'
         )
 
 
+def _m114_account_market_and_currency(conn: Connection) -> None:
+    _add_column_if_missing(
+        conn,
+        "accounts",
+        "market",
+        "ALTER TABLE accounts ADD COLUMN market TEXT DEFAULT 'CN'",
+    )
+    _add_column_if_missing(
+        conn,
+        "accounts",
+        "base_currency",
+        "ALTER TABLE accounts ADD COLUMN base_currency TEXT DEFAULT 'CNY'",
+    )
+
+    if not _has_table(conn, "accounts"):
+        return
+
+    # 默认兜底，避免空值。
+    conn.execute(
+        text(
+            """
+UPDATE accounts
+SET market = 'CN'
+WHERE market IS NULL OR TRIM(market) = ''
+"""
+        )
+    )
+    conn.execute(
+        text(
+            """
+UPDATE accounts
+SET base_currency = 'CNY'
+WHERE base_currency IS NULL OR TRIM(base_currency) = ''
+"""
+        )
+    )
+
+    if not (_has_table(conn, "positions") and _has_table(conn, "stocks")):
+        return
+
+    account_ids = [
+        int(r[0])
+        for r in conn.execute(text("SELECT id FROM accounts")).fetchall()
+        if r and r[0] is not None
+    ]
+    for account_id in account_ids:
+        rows = conn.execute(
+            text(
+                """
+SELECT DISTINCT UPPER(COALESCE(s.market, 'CN')) AS market
+FROM positions p
+JOIN stocks s ON s.id = p.stock_id
+WHERE p.account_id = :account_id
+"""
+            ),
+            {"account_id": account_id},
+        ).fetchall()
+        markets = {str(r[0] or "CN") for r in rows}
+        if len(markets) != 1:
+            continue
+
+        market = next(iter(markets))
+        if market not in {"CN", "HK", "US"}:
+            continue
+
+        base_currency = "CNY"
+        if market == "HK":
+            base_currency = "HKD"
+        elif market == "US":
+            base_currency = "USD"
+
+        conn.execute(
+            text(
+                """
+UPDATE accounts
+SET market = :market,
+    base_currency = :base_currency
+WHERE id = :account_id
+"""
+            ),
+            {
+                "account_id": account_id,
+                "market": market,
+                "base_currency": base_currency,
+            },
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -1408,6 +1496,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(111, "strategy_layer", _m111_strategy_layer),
     Migration(112, "strategy_analytics_snapshots", _m112_strategy_analytics_snapshots),
     Migration(113, "market_scan_snapshot_and_mixed_source", _m113_market_scan_snapshot_and_mixed_source),
+    Migration(114, "account_market_and_currency", _m114_account_market_and_currency),
 )
 
 

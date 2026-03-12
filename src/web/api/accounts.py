@@ -20,6 +20,15 @@ _hkd_rate_cache: dict = {"rate": 0.92, "ts": 0}  # 港币默认汇率 0.92
 _usd_rate_cache: dict = {"rate": 7.25, "ts": 0}  # 美元默认汇率 7.25
 EXCHANGE_RATE_TTL = 3600  # 1 小时缓存
 
+SUPPORTED_ACCOUNT_MARKETS = {"CN", "HK", "US"}
+SUPPORTED_CURRENCIES = {"CNY", "HKD", "USD"}
+MARKET_CURRENCY_MAP = {
+    "CN": "CNY",
+    "HK": "HKD",
+    "US": "USD",
+    "FUND": "CNY",
+}
+
 
 def get_hkd_cny_rate() -> float:
     """获取港币兑人民币汇率"""
@@ -89,22 +98,60 @@ def get_usd_cny_rate() -> float:
     return _usd_rate_cache["rate"]
 
 
+def get_currency_rate_to_cny(currency: str, rates_to_cny: dict[str, float]) -> float:
+    cur = (currency or "CNY").upper()
+    return float(rates_to_cny.get(cur, 1.0))
+
+
+def convert_amount(amount: float, from_currency: str, to_currency: str, rates_to_cny: dict[str, float]) -> float:
+    src = (from_currency or "CNY").upper()
+    dst = (to_currency or "CNY").upper()
+    if src == dst:
+        return float(amount)
+    src_to_cny = get_currency_rate_to_cny(src, rates_to_cny)
+    dst_to_cny = get_currency_rate_to_cny(dst, rates_to_cny)
+    if dst_to_cny == 0:
+        return float(amount)
+    amount_cny = float(amount) * src_to_cny
+    return amount_cny / dst_to_cny
+
+
+def normalize_account_market(value: str | None) -> str:
+    market = (value or "CN").upper()
+    if market not in SUPPORTED_ACCOUNT_MARKETS:
+        raise HTTPException(400, "market 仅支持 CN/HK/US")
+    return market
+
+
+def normalize_currency(value: str | None) -> str:
+    currency = (value or "CNY").upper()
+    if currency not in SUPPORTED_CURRENCIES:
+        raise HTTPException(400, "base_currency 仅支持 CNY/HKD/USD")
+    return currency
+
+
 # ========== Pydantic Models ==========
 
 class AccountCreate(BaseModel):
     name: str
     available_funds: float = 0
+    market: str = "CN"
+    base_currency: str = "CNY"
 
 
 class AccountUpdate(BaseModel):
     name: str | None = None
     available_funds: float | None = None
+    market: str | None = None
+    base_currency: str | None = None
     enabled: bool | None = None
 
 
 class AccountResponse(BaseModel):
     id: int
     name: str
+    market: str
+    base_currency: str
     available_funds: float
     enabled: bool
 
@@ -175,7 +222,14 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
 @router.post("/accounts", response_model=AccountResponse)
 def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     """创建账户"""
-    account = Account(name=data.name, available_funds=data.available_funds)
+    market = normalize_account_market(data.market)
+    base_currency = normalize_currency(data.base_currency)
+    account = Account(
+        name=data.name,
+        available_funds=data.available_funds,
+        market=market,
+        base_currency=base_currency,
+    )
     db.add(account)
     db.commit()
     db.refresh(account)
@@ -194,6 +248,10 @@ def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(g
         account.name = data.name
     if data.available_funds is not None:
         account.available_funds = data.available_funds
+    if data.market is not None:
+        account.market = normalize_account_market(data.market)
+    if data.base_currency is not None:
+        account.base_currency = normalize_currency(data.base_currency)
     if data.enabled is not None:
         account.enabled = data.enabled
 
@@ -377,6 +435,7 @@ def reorder_positions(data: PositionReorderRequest, db: Session = Depends(get_db
 def get_portfolio_summary(
     account_id: int | None = None,
     include_quotes: bool = True,
+    display_currency: str = "CNY",
     db: Session = Depends(get_db),
 ):
     """
@@ -389,6 +448,8 @@ def get_portfolio_summary(
         accounts: 账户列表及各账户持仓明细
         total: 所有账户汇总
     """
+    display_currency_norm = normalize_currency(display_currency)
+
     # 获取账户
     if account_id:
         accounts = db.query(Account).filter(Account.id == account_id, Account.enabled == True).all()
@@ -403,8 +464,11 @@ def get_portfolio_summary(
                 "total_cost": 0,
                 "total_pnl": 0,
                 "total_pnl_pct": 0,
+                "day_pnl": 0,
+                "day_pnl_pct": 0,
                 "available_funds": 0,
                 "total_assets": 0,
+                "display_currency": display_currency_norm,
             }
         }
 
@@ -420,20 +484,34 @@ def get_portfolio_summary(
     # 获取实时行情（可选）
     quotes = _fetch_quotes_for_stocks(stocks) if include_quotes else {}
 
-    # 获取汇率
+    # 获取汇率（统一先换算到 CNY，再换算到展示币种）
     hkd_rate = get_hkd_cny_rate()
     usd_rate = get_usd_cny_rate()
+    rates_to_cny = {
+        "CNY": 1.0,
+        "HKD": hkd_rate,
+        "USD": usd_rate,
+    }
 
     # 计算各账户持仓
     account_summaries = []
     grand_total_market_value = 0
     grand_total_cost = 0
+    grand_total_day_pnl = 0
+    grand_total_day_cost = 0
     grand_available_funds = 0
 
     for acc in accounts:
         positions_data = []
         acc_market_value = 0
         acc_cost = 0
+        acc_day_pnl = 0
+        acc_day_cost = 0
+
+        account_market = (acc.market or "CN").upper()
+        account_base_currency = (acc.base_currency or "").upper()
+        if account_base_currency not in SUPPORTED_CURRENCIES:
+            account_base_currency = MARKET_CURRENCY_MAP.get(account_market, "CNY")
 
         positions_sorted = sorted(
             list(acc.positions or []),
@@ -444,35 +522,66 @@ def get_portfolio_summary(
             if not stock:
                 continue
 
-            quote = quotes.get(stock.symbol)
+            quote = quotes.get(f"{stock.market}:{stock.symbol}")
             current_price = quote["current_price"] if quote else None
             change_pct = quote["change_pct"] if quote else None
+            prev_close = quote["prev_close"] if quote else None
 
-            # 根据市场确定汇率
-            is_foreign = stock.market in ("HK", "US")
-            if stock.market == "HK":
-                rate = hkd_rate
-            elif stock.market == "US":
-                rate = usd_rate
-            else:
-                rate = 1.0
+            position_currency = MARKET_CURRENCY_MAP.get((stock.market or "CN").upper(), "CNY")
+            rate_to_display = convert_amount(1.0, position_currency, display_currency_norm, rates_to_cny)
 
             market_value = None
-            market_value_cny = None
-            pnl = None
+            market_value_display = None
+            pnl_display = None
             pnl_pct = None
+            day_pnl_display = None
+            day_pnl_pct = None
 
-            cost = pos.cost_price * pos.quantity
-            cost_cny = cost * rate  # 假设成本价也是原币种
-            acc_cost += cost_cny
+            cost_native = pos.cost_price * pos.quantity
+            cost_display = convert_amount(cost_native, position_currency, display_currency_norm, rates_to_cny)
+            acc_cost += cost_display
 
             if current_price is not None:
                 market_value = current_price * pos.quantity  # 原币种市值
-                market_value_cny = market_value * rate  # 人民币市值
-                pnl = market_value_cny - cost_cny
-                pnl_pct = (pnl / cost_cny * 100) if cost_cny > 0 else 0
+                market_value_display = convert_amount(
+                    market_value,
+                    position_currency,
+                    display_currency_norm,
+                    rates_to_cny,
+                )
+                pnl_display = market_value_display - cost_display
+                pnl_pct = (pnl_display / cost_display * 100) if cost_display > 0 else 0
 
-                acc_market_value += market_value_cny
+                if prev_close is not None and prev_close > 0:
+                    day_cost_native = prev_close * pos.quantity
+                    day_cost_display = convert_amount(
+                        day_cost_native,
+                        position_currency,
+                        display_currency_norm,
+                        rates_to_cny,
+                    )
+                    day_pnl_native = (current_price - prev_close) * pos.quantity
+                    day_pnl_display = convert_amount(
+                        day_pnl_native,
+                        position_currency,
+                        display_currency_norm,
+                        rates_to_cny,
+                    )
+                    day_pnl_pct = (day_pnl_display / day_cost_display * 100) if day_cost_display > 0 else 0
+                    acc_day_pnl += day_pnl_display
+                    acc_day_cost += day_cost_display
+
+                acc_market_value += market_value_display
+
+
+            current_price_display = None
+            if current_price is not None:
+                current_price_display = convert_amount(
+                    current_price,
+                    position_currency,
+                    display_currency_norm,
+                    rates_to_cny,
+                )
 
             positions_data.append({
                 "id": pos.id,
@@ -485,48 +594,79 @@ def get_portfolio_summary(
                 "invested_amount": pos.invested_amount,
                 "sort_order": pos.sort_order or 0,
                 "trading_style": pos.trading_style,
+                "currency": position_currency,
                 "current_price": current_price,
-                "current_price_cny": round(current_price * rate, 2) if current_price else None,
+                "current_price_display": round(current_price_display, 4) if current_price_display is not None else None,
+                # 兼容旧字段名（历史前端使用）。
+                "current_price_cny": round(current_price_display, 4) if current_price_display is not None else None,
                 "change_pct": change_pct,
                 "market_value": round(market_value, 2) if market_value else None,
-                "market_value_cny": round(market_value_cny, 2) if market_value_cny else None,
-                "pnl": round(pnl, 2) if pnl else None,
-                "pnl_pct": round(pnl_pct, 2) if pnl_pct else None,
-                "exchange_rate": rate if is_foreign else None,
+                "market_value_display": round(market_value_display, 2) if market_value_display is not None else None,
+                # 兼容旧字段名（历史前端使用）。
+                "market_value_cny": round(market_value_display, 2) if market_value_display is not None else None,
+                "pnl": round(pnl_display, 2) if pnl_display is not None else None,
+                "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+                "day_pnl": round(day_pnl_display, 2) if day_pnl_display is not None else None,
+                "day_pnl_pct": round(day_pnl_pct, 2) if day_pnl_pct is not None else None,
+                "exchange_rate": round(rate_to_display, 6),
             })
 
         if include_quotes:
             acc_pnl = acc_market_value - acc_cost
             acc_pnl_pct = (acc_pnl / acc_cost * 100) if acc_cost > 0 else 0
-            acc_total_assets = acc_market_value + acc.available_funds
+            acc_day_pnl_pct = (acc_day_pnl / acc_day_cost * 100) if acc_day_cost > 0 else 0
+            acc_available_funds_display = convert_amount(
+                acc.available_funds,
+                account_base_currency,
+                display_currency_norm,
+                rates_to_cny,
+            )
+            acc_total_assets = acc_market_value + acc_available_funds_display
         else:
             acc_pnl = 0
             acc_pnl_pct = 0
-            acc_total_assets = acc.available_funds
+            acc_day_pnl_pct = 0
+            acc_available_funds_display = convert_amount(
+                acc.available_funds,
+                account_base_currency,
+                display_currency_norm,
+                rates_to_cny,
+            )
+            acc_total_assets = acc_available_funds_display
 
         account_summaries.append({
             "id": acc.id,
             "name": acc.name,
-            "available_funds": acc.available_funds,
+            "market": account_market,
+            "base_currency": account_base_currency,
+            "display_currency": display_currency_norm,
+            "available_funds": round(acc_available_funds_display, 2),
+            "available_funds_native": round(acc.available_funds, 2),
             "total_market_value": round(acc_market_value, 2),
             "total_cost": round(acc_cost, 2),
             "total_pnl": round(acc_pnl, 2),
             "total_pnl_pct": round(acc_pnl_pct, 2),
+            "day_pnl": round(acc_day_pnl, 2),
+            "day_pnl_pct": round(acc_day_pnl_pct, 2),
             "total_assets": round(acc_total_assets, 2),
             "positions": positions_data,
         })
 
         grand_total_market_value += acc_market_value
         grand_total_cost += acc_cost
-        grand_available_funds += acc.available_funds
+        grand_total_day_pnl += acc_day_pnl
+        grand_total_day_cost += acc_day_cost
+        grand_available_funds += acc_available_funds_display
 
     if include_quotes:
         grand_pnl = grand_total_market_value - grand_total_cost
         grand_pnl_pct = (grand_pnl / grand_total_cost * 100) if grand_total_cost > 0 else 0
+        grand_day_pnl_pct = (grand_total_day_pnl / grand_total_day_cost * 100) if grand_total_day_cost > 0 else 0
         grand_total_assets = grand_total_market_value + grand_available_funds
     else:
         grand_pnl = 0
         grand_pnl_pct = 0
+        grand_day_pnl_pct = 0
         grand_total_assets = grand_available_funds
 
     # 构建 quotes 字典（用于前端股票列表显示）
@@ -536,6 +676,7 @@ def get_portfolio_summary(
             quotes_dict[symbol] = {
                 "current_price": quote.get("current_price"),
                 "change_pct": quote.get("change_pct"),
+                "prev_close": quote.get("prev_close"),
             }
 
     return {
@@ -545,12 +686,17 @@ def get_portfolio_summary(
             "total_cost": round(grand_total_cost, 2),
             "total_pnl": round(grand_pnl, 2),
             "total_pnl_pct": round(grand_pnl_pct, 2),
+            "day_pnl": round(grand_total_day_pnl, 2),
+            "day_pnl_pct": round(grand_day_pnl_pct, 2),
             "available_funds": round(grand_available_funds, 2),
             "total_assets": round(grand_total_assets, 2),
+            "display_currency": display_currency_norm,
         },
+        "display_currency": display_currency_norm,
         "exchange_rates": {
             "HKD_CNY": hkd_rate,
             "USD_CNY": usd_rate,
+            "rates_to_cny": rates_to_cny,
         },
         "quotes": quotes_dict,  # 可选：返回行情数据
     }
@@ -577,7 +723,8 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
         try:
             items = _fetch_tencent_quotes(symbols)
             for item in items:
-                quotes[item["symbol"]] = item
+                quote_key = f"{market}:{item['symbol']}"
+                quotes[quote_key] = item
         except Exception as e:
             logger.error(f"获取 {market} 行情失败: {e}")
 
