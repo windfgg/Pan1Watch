@@ -7,8 +7,8 @@
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
-| 持仓管理 | AI 建议 |
-|:---:|:---:|
+|                    持仓管理                    |                     AI 建议                      |
+| :--------------------------------------------: | :----------------------------------------------: |
 | ![Portfolio](./docs/screenshots/portfolio.png) | ![Suggestion](./docs/screenshots/suggestion.png) |
 
 <details>
@@ -22,6 +22,7 @@
 
 - **数据私有** — 自托管部署，持仓数据不经过任何第三方
 - **AI 原生** — 不是简单的指标堆砌，而是让 AI 理解你的持仓、风格和目标
+- **MCP 原生** — 标准 JSON-RPC 接口，支持 Bearer/Basic 双认证，便于接入各类 MCP 客户端
 - **开箱即用** — Docker 一键部署，5 分钟完成配置
 
 ## 核心功能
@@ -29,12 +30,12 @@
 <details>
 <summary><b>智能 Agent 系统</b></summary>
 
-| Agent | 触发时机 | 功能 |
-|-------|---------|------|
-| **盘前分析** | 每日开盘前 | 综合隔夜美股、新闻消息、技术形态，给出今日操作策略 |
-| **盘中监测** | 交易时段实时 | 监控异动信号，RSI/KDJ/MACD 共振时推送提醒 |
-| **盘后日报** | 每日收盘后 | 复盘当日走势，分析资金流向，规划次日操作 |
-| **新闻速递** | 定时采集 | 抓取财经新闻，AI 筛选与持仓相关的重要信息 |
+| Agent        | 触发时机     | 功能                                               |
+| ------------ | ------------ | -------------------------------------------------- |
+| **盘前分析** | 每日开盘前   | 综合隔夜美股、新闻消息、技术形态，给出今日操作策略 |
+| **盘中监测** | 交易时段实时 | 监控异动信号，RSI/KDJ/MACD 共振时推送提醒          |
+| **盘后日报** | 每日收盘后   | 复盘当日走势，分析资金流向，规划次日操作           |
+| **新闻速递** | 定时采集     | 抓取财经新闻，AI 筛选与持仓相关的重要信息          |
 
 </details>
 
@@ -119,14 +120,14 @@ docker-compose up -d
 <details>
 <summary>环境变量</summary>
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `AUTH_USERNAME` | 预设登录用户名 | 首次访问时设置 |
-| `AUTH_PASSWORD` | 预设登录密码 | 首次访问时设置 |
-| `JWT_SECRET` | JWT 签名密钥 | 自动生成 |
-| `DATA_DIR` | 数据存储目录 | `./data` |
-| `TZ` | 应用时区（影响 Agent 调度触发时间与时间展示） | `Asia/Shanghai` |
-| `PLAYWRIGHT_SKIP_BROWSER_INSTALL` | 跳过首次 Chromium 安装（不需要截图时可用） | 未设置 |
+| 变量名                            | 说明                                          | 默认值          |
+| --------------------------------- | --------------------------------------------- | --------------- |
+| `AUTH_USERNAME`                   | 预设登录用户名                                | 首次访问时设置  |
+| `AUTH_PASSWORD`                   | 预设登录密码                                  | 首次访问时设置  |
+| `JWT_SECRET`                      | JWT 签名密钥                                  | 自动生成        |
+| `DATA_DIR`                        | 数据存储目录                                  | `./data`        |
+| `TZ`                              | 应用时区（影响 Agent 调度触发时间与时间展示） | `Asia/Shanghai` |
+| `PLAYWRIGHT_SKIP_BROWSER_INSTALL` | 跳过首次 Chromium 安装（不需要截图时可用）    | 未设置          |
 
 </details>
 
@@ -168,6 +169,70 @@ cd frontend && pnpm install && pnpm dev
 
 </details>
 
+## MCP 接口
+
+PanWatch 提供标准 JSON-RPC over HTTP 的 MCP 接口：`/api/mcp`。
+
+- 认证方式：
+  - Bearer：复用 Web 登录 token（推荐）
+  - Basic：使用系统用户名和密码
+- 协议能力：`initialize`、`tools/list`、`tools/call`
+- 主要工具：持仓 CRUD、自选股查询、市场指数、Dashboard 概览、MCP 诊断工具
+
+### MCP 客户端配置示例
+
+Bearer：
+
+```json
+{
+  "mcpServers": {
+    "panwatch": {
+      "url": "http://127.0.0.1:8000/api/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+Basic：
+
+```json
+{
+  "mcpServers": {
+    "panwatch": {
+      "url": "http://127.0.0.1:8000/api/mcp",
+      "headers": {
+        "Authorization": "Basic <base64(username:password)>"
+      }
+    }
+  }
+}
+```
+
+### JSON-RPC 调用示例
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <YOUR_TOKEN>' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <YOUR_TOKEN>' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"positions.list","arguments":{"page":1,"page_size":20}}}'
+```
+
+### 常见错误
+
+- `401 Unauthorized`：token 失效，或 Basic 用户名密码错误
+- JSON-RPC `-32602`：参数不合法（请按 `tools/list` 的 `inputSchema` 传参）
+- JSON-RPC `-32004`：工具名不存在
+
 <details>
 <summary><b>发布（Docker 镜像）</b></summary>
 
@@ -189,8 +254,8 @@ cd frontend && pnpm install && pnpm dev
 
 如果你觉得 PanWatch 有帮助，欢迎请作者喝杯咖啡：
 
-| 微信赞赏 | 支付宝 |
-|:---:|:---:|
+|                      微信赞赏                      |                       支付宝                       |
+| :------------------------------------------------: | :------------------------------------------------: |
 | <img src="./docs/donate/wechat.png" width="240" /> | <img src="./docs/donate/alipay.png" width="240" /> |
 
 ## 贡献
