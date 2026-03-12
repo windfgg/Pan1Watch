@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, ExternalLink, BarChart3, LayoutGrid, List } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, BarChart3, LayoutGrid, List, FileText } from 'lucide-react'
 import { fetchAPI, stocksApi, type AIService, type NotifyChannel } from '@panwatch/api'
 import { useLocalStorage } from '@/lib/utils'
 import { useRefreshReceiver, useAutoRefreshProgress } from '@/hooks/use-global-refresh'
@@ -18,6 +19,7 @@ import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import StockInsightModal from '@panwatch/biz-ui/components/stock-insight-modal'
 import StockPriceAlertPanel from '@panwatch/biz-ui/components/stock-price-alert-panel'
 import FundOverviewModal from '@/components/FundOverviewModal'
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog'
 
 interface AgentResult {
   success?: boolean
@@ -222,18 +224,6 @@ interface MarketStatus {
   is_trading: boolean
   sessions: string[]
   local_time: string
-}
-
-interface NewsItem {
-  source: string
-  source_label: string
-  external_id: string
-  title: string
-  content: string
-  publish_time: string
-  symbols: string[]
-  importance: number
-  url: string
 }
 
 interface PriceAlertRuleSummary {
@@ -448,6 +438,7 @@ export default function StocksPage() {
   const [autoRefresh, setAutoRefresh] = useLocalStorage('panwatch_stocks_autoRefresh', false)
   const [refreshInterval, setRefreshInterval] = useLocalStorage('panwatch_stocks_refreshInterval', 30)
   const [displayCurrency, setDisplayCurrency] = useLocalStorage<'CNY' | 'HKD' | 'USD'>('panwatch_stocks_display_currency', 'CNY')
+  const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null)
   const [, setNextAutoRefreshAt] = useState<number | null>(null)
   const [, setAutoRefreshTick] = useState<number>(Date.now())
   const refreshTimerRef = useRef<ReturnType<typeof setInterval>>()
@@ -467,12 +458,6 @@ export default function StocksPage() {
   const [poolSuggestions, setPoolSuggestions] = useState<Record<string, PoolSuggestion>>({})
   const [poolSuggestionsLoading, setPoolSuggestionsLoading] = useState(false)
   const [priceAlertSummaryMap, setPriceAlertSummaryMap] = useState<Record<string, { total: number; enabled: number }>>({})
-
-  // News Dialog
-  const [newsDialogOpen, setNewsDialogOpen] = useState(false)
-  const [newsDialogSymbol, setNewsDialogSymbol] = useState<string>('')  // 空=全部, 否则=指定股票
-  const [news, setNews] = useState<NewsItem[]>([])
-  const [newsLoading, setNewsLoading] = useState(false)
 
   // Kline Dialog
   const [klineDialogOpen, setKlineDialogOpen] = useState(false)
@@ -552,6 +537,8 @@ export default function StocksPage() {
   const positionDragSnapshotRef = useRef<PortfolioSummary | null>(null)
 
   const { toast } = useToast()
+  const navigate = useNavigate()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const moveById = <T extends { id: number }>(list: T[], fromId: number, toId: number): T[] => {
     const fromIdx = list.findIndex(x => x.id === fromId)
@@ -660,6 +647,7 @@ export default function StocksPage() {
       ])
       setStocks(stockData)
       setAccounts(accountData)
+      setLastRefreshTime(new Date())
       // 默认展开所有账户
       setExpandedAccounts(new Set(accountData.map((a: Account) => a.id)))
     } catch (e) {
@@ -687,6 +675,7 @@ export default function StocksPage() {
       const portfolioData = await fetchAPI<PortfolioSummary>(`/portfolio/summary?include_quotes=false&display_currency=${encodeURIComponent(displayCurrency)}`)
       setPortfolioRaw(portfolioData)
       setPortfolio(mergePortfolioQuotes(portfolioData, quotes))
+      setLastRefreshTime(new Date())
 
       // 市场状态（非核心，失败不影响页面）
       try {
@@ -753,6 +742,7 @@ export default function StocksPage() {
         }
       }
       setQuotes(map)
+      setLastRefreshTime(new Date())
     } catch (e) {
       console.warn('刷新行情失败:', e)
     } finally {
@@ -835,24 +825,6 @@ export default function StocksPage() {
     }
   }, [])
 
-  // Load news for specific stock or all watchlist
-  const loadNews = useCallback(async (stockName?: string) => {
-    setNewsLoading(true)
-    try {
-      const params = new URLSearchParams({ hours: '168', limit: '50' })  // 7天
-      if (stockName) {
-        // 直接传递股票名称，比代码更稳定
-        params.set('names', stockName)
-      }
-      const newsData = await fetchAPI<NewsItem[]>(`/news?${params}`)
-      setNews(newsData)
-    } catch (e) {
-      console.error('加载新闻失败:', e)
-    } finally {
-      setNewsLoading(false)
-    }
-  }, [])
-
   const openKlineDialog = useCallback((symbol: string, market: string, name?: string, hasPosition?: boolean) => {
     setKlineDialogSymbol(symbol)
     setKlineDialogMarket(market || 'CN')
@@ -863,12 +835,14 @@ export default function StocksPage() {
     setKlineDialogOpen(true)
   }, [klineSummaries])
 
-  // Open news dialog - pass stock name for more stable search
-  const openNewsDialog = useCallback((stockName?: string) => {
-    setNewsDialogSymbol(stockName || '')  // 存储名称用于 UI 显示
-    setNewsDialogOpen(true)
-    loadNews(stockName)
-  }, [loadNews])
+  const openIntelCenter = useCallback((tab: 'news' | 'report', symbol: string, market: string, stockName?: string) => {
+    const params = new URLSearchParams()
+    params.set('tab', tab)
+    params.set('symbol', String(symbol || '').toUpperCase())
+    params.set('market', String(market || 'CN').toUpperCase())
+    if (stockName) params.set('name', stockName)
+    navigate(`/intel?${params.toString()}`)
+  }, [navigate])
 
   const openStockDetail = useCallback((stockSymbol: string, stockMarket: string, stockName?: string, hasPosition?: boolean) => {
     if ((stockMarket || '').toUpperCase() === 'FUND') {
@@ -1163,7 +1137,7 @@ export default function StocksPage() {
       setSearchQuery('')
       setShowStockForm(false)
       load()
-      toast('股票已添加', 'success')
+      toast('添加自选完成', 'success')
     } catch (e) {
       toast(e instanceof Error ? e.message : '添加自选失败', 'error')
     }
@@ -1234,7 +1208,12 @@ export default function StocksPage() {
   }
 
   const handleDeleteAccount = async (id: number) => {
-    if (!confirm('确定删除该账户？这将同时删除该账户的所有持仓记录')) return
+    if (!(await confirm({
+      title: '删除账户',
+      description: '确定删除该账户？这将同时删除该账户的所有持仓记录。',
+      variant: 'destructive',
+      confirmText: '删除',
+    }))) return
     try {
       await fetchAPI(`/accounts/${id}`, { method: 'DELETE' })
       load()
@@ -1377,7 +1356,7 @@ export default function StocksPage() {
   }
 
   const handleDeletePosition = async (id: number) => {
-    if (!confirm('确定删除该持仓？')) return
+    if (!(await confirm({ description: '确定删除该持仓？', variant: 'destructive', confirmText: '删除' }))) return
     try {
       await fetchAPI(`/positions/${id}`, { method: 'DELETE' })
       loadPortfolio()
@@ -1838,6 +1817,11 @@ export default function StocksPage() {
                   </div>
                 )
               })}
+              {lastRefreshTime ? (
+                <div className="px-2.5 py-0.5 rounded-full bg-background/70 border border-border/50 text-[10px] text-muted-foreground">
+                  更新 <span className="font-mono text-foreground/90">{lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                </div>
+              ) : null}
             </div>
           </div>
           {/* Desktop buttons + controls */}
@@ -2551,7 +2535,8 @@ export default function StocksPage() {
                                         initialEnabled={getPriceAlertSummary(pos.symbol, pos.market).enabled}
                                         onChanged={loadPriceAlertSummaries}
                                       />
-                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openNewsDialog(pos.name)} title="相关资讯"><Newspaper className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('report', pos.symbol, pos.market, pos.name)} title="相关报告"><FileText className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('news', pos.symbol, pos.market, pos.name)} title="相关资讯"><Newspaper className="w-3 h-3" /></Button>
                                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)}><Pencil className="w-3 h-3" /></Button>
                                       <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)}><Trash2 className="w-3 h-3" /></Button>
                                     </div>
@@ -2701,7 +2686,8 @@ export default function StocksPage() {
                                     initialEnabled={getPriceAlertSummary(pos.symbol, pos.market).enabled}
                                     onChanged={loadPriceAlertSummaries}
                                   />
-                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openNewsDialog(pos.name)}><Newspaper className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('report', pos.symbol, pos.market, pos.name)} title="相关报告"><FileText className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('news', pos.symbol, pos.market, pos.name)} title="相关资讯"><Newspaper className="w-3 h-3" /></Button>
                                   <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)}><Pencil className="w-3 h-3" /></Button>
                                   <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)}><Trash2 className="w-3 h-3" /></Button>
                                 </div>
@@ -2916,7 +2902,10 @@ export default function StocksPage() {
                                 initialEnabled={getPriceAlertSummary(stock.symbol, stock.market).enabled}
                                 onChanged={loadPriceAlertSummaries}
                               />
-                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openNewsDialog(stock.name)} title="相关资讯">
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('report', stock.symbol, stock.market, stock.name)} title="相关报告">
+                                <FileText className="w-3.5 h-3.5" />
+                              </Button>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('news', stock.symbol, stock.market, stock.name)} title="相关资讯">
                                 <Newspaper className="w-3.5 h-3.5" />
                               </Button>
                               <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => setRemoveWatchStock(stock)} title="删除">
@@ -3077,10 +3066,19 @@ export default function StocksPage() {
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
-                          onClick={() => openNewsDialog(stock.name)}
+                          onClick={() => openIntelCenter('news', stock.symbol, stock.market, stock.name)}
                           title="相关资讯"
                         >
                           <Newspaper className="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => openIntelCenter('report', stock.symbol, stock.market, stock.name)}
+                          title="相关报告"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
                         </Button>
                         <Button
                           variant="ghost"
@@ -3198,19 +3196,26 @@ export default function StocksPage() {
                     <SelectItem value="CN">A股</SelectItem>
                     <SelectItem value="HK">港股</SelectItem>
                     <SelectItem value="US">美股</SelectItem>
+                    <SelectItem value="FUND">基金</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div>
                 <Label>账户币种</Label>
-                <Select value={accountForm.base_currency} onValueChange={v => setAccountForm({ ...accountForm, base_currency: (v || 'CNY').toUpperCase() })}>
+                <Select
+                  value={accountForm.market === 'FUND' ? 'CNY' : accountForm.base_currency}
+                  onValueChange={v => {
+                    const nextCurrency = accountForm.market === 'FUND' ? 'CNY' : (v || 'CNY').toUpperCase()
+                    setAccountForm({ ...accountForm, base_currency: nextCurrency })
+                  }}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="CNY">CNY</SelectItem>
-                    <SelectItem value="HKD">HKD</SelectItem>
-                    <SelectItem value="USD">USD</SelectItem>
+                    {accountForm.market !== 'FUND' && <SelectItem value="HKD">HKD</SelectItem>}
+                    {accountForm.market !== 'FUND' && <SelectItem value="USD">USD</SelectItem>}
                   </SelectContent>
                 </Select>
               </div>
@@ -3643,147 +3648,8 @@ export default function StocksPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 相关资讯弹窗 */}
-      <Dialog open={newsDialogOpen} onOpenChange={setNewsDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Newspaper className="w-5 h-5 text-blue-500" />
-              相关资讯
-            </DialogTitle>
-            <DialogDescription>
-              {newsDialogSymbol
-                ? `${newsDialogSymbol} 的相关新闻和公告`
-                : '自选股相关新闻和公告（近 72 小时）'
-              }
-            </DialogDescription>
-          </DialogHeader>
+      {confirmDialog}
 
-          {/* 股票筛选器 */}
-          <div className="flex items-center gap-2 flex-wrap py-2 border-b">
-            <span className="text-[12px] text-muted-foreground">筛选:</span>
-            <button
-              onClick={() => { setNewsDialogSymbol(''); loadNews() }}
-              className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
-                !newsDialogSymbol
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-accent/50 text-muted-foreground hover:bg-accent'
-              }`}
-            >
-              全部
-            </button>
-            {stocks.slice(0, 10).map(stock => (
-              <button
-                key={stock.symbol}
-                onClick={() => { setNewsDialogSymbol(stock.name); loadNews(stock.name) }}
-                className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
-                  newsDialogSymbol === stock.name
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-accent/50 text-muted-foreground hover:bg-accent'
-                }`}
-              >
-                {stock.name}
-              </button>
-            ))}
-            {stocks.length > 10 && (
-              <span className="text-[10px] text-muted-foreground">+{stocks.length - 10}</span>
-            )}
-          </div>
-
-          {/* 新闻列表 */}
-          <div className="flex-1 overflow-y-auto min-h-0 py-2">
-            {newsLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <span className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-                <span className="ml-2 text-[13px] text-muted-foreground">加载中...</span>
-              </div>
-            ) : news.length === 0 ? (
-              <div className="text-center py-12 text-muted-foreground text-[13px]">
-                暂无相关资讯
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {news.map((item, idx) => (
-                  <div
-                    key={`${item.source}-${item.external_id}-${idx}`}
-                    className="p-3 rounded-lg bg-accent/30 hover:bg-accent/50 transition-colors"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                            item.source === 'eastmoney' ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400' :
-                            item.source === 'eastmoney_news' ? 'bg-blue-500/10 text-blue-500' :
-                            'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                          }`}>
-                            {item.source_label}
-                          </span>
-                          {item.importance >= 2 && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-500">
-                              重要
-                            </span>
-                          )}
-                          <span className="text-[10px] text-muted-foreground">
-                            {item.publish_time}
-                          </span>
-                        </div>
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[13px] font-medium text-foreground hover:text-primary transition-colors block"
-                        >
-                          {item.title}
-                        </a>
-                        {item.symbols.length > 0 && (
-                          <div className="flex items-center gap-1.5 mt-2">
-                            {item.symbols.slice(0, 5).map(sym => {
-                              const stockInfo = stocks.find(s => s.symbol === sym)
-                              const stockName = stockInfo?.name || sym
-                              return (
-                                <button
-                                  key={sym}
-                                  onClick={() => { setNewsDialogSymbol(stockName); loadNews(stockName) }}
-                                  className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono hover:bg-primary/20 transition-colors"
-                                >
-                                  {stockName}
-                                </button>
-                              )
-                            })}
-                            {item.symbols.length > 5 && (
-                              <span className="text-[10px] text-muted-foreground">+{item.symbols.length - 5}</span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      <a
-                        href={item.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex-shrink-0 p-1.5 rounded-md hover:bg-accent transition-colors"
-                        title="查看原文"
-                      >
-                        <ExternalLink className="w-4 h-4 text-muted-foreground" />
-                      </a>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* 底部刷新按钮 */}
-          <div className="flex items-center justify-between pt-2 border-t">
-            <span className="text-[11px] text-muted-foreground">
-              共 {news.length} 条资讯
-            </span>
-            <Button variant="secondary" size="sm" onClick={() => loadNews(newsDialogSymbol || undefined)} disabled={newsLoading}>
-              <RefreshCw className={`w-3 h-3 ${newsLoading ? 'animate-spin' : ''}`} />
-              刷新
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

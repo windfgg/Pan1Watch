@@ -70,6 +70,15 @@ class HistoryResponse(BaseModel):
         from_attributes = True
 
 
+class HistoryPagedResponse(BaseModel):
+    items: list[HistoryResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+    ai_extension: dict
+
+
 @router.get("")
 def list_history(
     agent_name: str | None = None,
@@ -145,6 +154,115 @@ def list_history(
         )
         for r in records
     ]
+
+
+@router.get("/paged", response_model=HistoryPagedResponse)
+def list_history_paged(
+    agent_name: str | None = None,
+    stock_symbol: str | None = None,
+    kind: str = Query(default=AGENT_KIND_WORKFLOW),
+    q: str = Query(default="", description="关键词搜索（标题/正文/Agent/股票）"),
+    page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(default=10, ge=1, le=100, description="每页条数"),
+    db: Session = Depends(get_db),
+) -> HistoryPagedResponse:
+    """获取分析历史分页列表（支持关键词搜索）。"""
+    query = db.query(AnalysisHistory)
+
+    if agent_name:
+        query = query.filter(AnalysisHistory.agent_name == agent_name)
+    if stock_symbol:
+        query = query.filter(AnalysisHistory.stock_symbol == stock_symbol)
+
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm == AGENT_KIND_CAPABILITY:
+        query = query.filter(
+            or_(
+                AnalysisHistory.agent_kind_snapshot == AGENT_KIND_CAPABILITY,
+                and_(
+                    or_(
+                        AnalysisHistory.agent_kind_snapshot.is_(None),
+                        AnalysisHistory.agent_kind_snapshot == "",
+                    ),
+                    AnalysisHistory.agent_name.in_(CAPABILITY_AGENT_NAMES),
+                ),
+            )
+        )
+    elif kind_norm == AGENT_KIND_WORKFLOW:
+        query = query.filter(
+            or_(
+                AnalysisHistory.agent_kind_snapshot == AGENT_KIND_WORKFLOW,
+                and_(
+                    or_(
+                        AnalysisHistory.agent_kind_snapshot.is_(None),
+                        AnalysisHistory.agent_kind_snapshot == "",
+                    ),
+                    ~AnalysisHistory.agent_name.in_(CAPABILITY_AGENT_NAMES),
+                ),
+            )
+        )
+
+    keyword = (q or "").strip()
+    if keyword:
+        like = f"%{keyword}%"
+        query = query.filter(
+            or_(
+                AnalysisHistory.title.ilike(like),
+                AnalysisHistory.content.ilike(like),
+                AnalysisHistory.agent_name.ilike(like),
+                AnalysisHistory.stock_symbol.ilike(like),
+                AnalysisHistory.analysis_date.ilike(like),
+            )
+        )
+
+    total = query.count()
+    records = (
+        query.order_by(
+            AnalysisHistory.analysis_date.desc(),
+            AnalysisHistory.updated_at.desc(),
+            AnalysisHistory.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = [
+        HistoryResponse(
+            id=r.id,
+            agent_name=r.agent_name,
+            agent_kind=(r.agent_kind_snapshot or infer_agent_kind(r.agent_name)),
+            stock_symbol=r.stock_symbol,
+            analysis_date=r.analysis_date,
+            title=r.title or "",
+            content=r.content,
+            suggestions=r.raw_data.get("suggestions") if r.raw_data else None,
+            news=r.raw_data.get("news") if r.raw_data else None,
+            quality_overview=r.raw_data.get("quality_overview") if r.raw_data else None,
+            context_summary=r.raw_data.get("context_summary") if r.raw_data else None,
+            context_payload=r.raw_data.get("context_payload") if r.raw_data else None,
+            prompt_context=r.raw_data.get("prompt_context") if r.raw_data else None,
+            prompt_stats=r.raw_data.get("prompt_stats") if r.raw_data else None,
+            news_debug=r.raw_data.get("news_debug") if r.raw_data else None,
+            created_at=_format_datetime(r.created_at),
+            updated_at=_format_datetime(r.updated_at),
+        )
+        for r in records
+    ]
+
+    return HistoryPagedResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=(page * page_size) < total,
+        ai_extension={
+            "single_turn_analysis": "reserved",
+            "multi_turn_conversation": "reserved",
+            "conversation_memory": "reserved",
+            "user_thesis_input": "reserved",
+        },
+    )
 
 
 @router.get("/{history_id}")

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, useLocation, Navigate } from 'react-router-dom'
-import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Plug, RefreshCw } from 'lucide-react'
+import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Plug, RefreshCw, Newspaper } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
 import { RefreshProvider, useRefresh } from '@/hooks/use-global-refresh'
 import { appApi, fetchAPI, isAuthenticated, logout } from '@panwatch/api'
@@ -10,10 +10,10 @@ import StocksPage from '@/pages/Stocks'
 import AgentsPage from '@/pages/Agents'
 import SettingsPage from '@/pages/Settings'
 import DataSourcesPage from '@/pages/DataSources'
-import HistoryPage from '@/pages/History'
 import PriceAlertsPage from '@/pages/PriceAlerts'
 import MCPPage from '@/pages/MCP'
 import LoginPage from '@/pages/Login'
+import IntelCenterPage from '@/pages/IntelCenter'
 import LogsModal from '@panwatch/biz-ui/components/logs-modal'
 import AmbientBackground from '@panwatch/biz-ui/components/AmbientBackground'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
@@ -22,10 +22,10 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: '首页' },
   { to: '/portfolio', icon: List, label: '持仓' },
+  { to: '/intel', icon: Newspaper, label: '情报' },
   { to: '/opportunities', icon: Sparkles, label: '机会' },
-  { to: '/alerts', icon: BellRing, label: '提醒' },
   { to: '/agents', icon: Bot, label: 'Agent' },
-  { to: '/history', icon: Clock, label: '历史' },
+  { to: '/alerts', icon: BellRing, label: '提醒' },
   { to: '/datasources', icon: Database, label: '数据源' },
   { to: '/mcp', icon: Plug, label: 'MCP' },
   { to: '/settings', icon: Settings, label: '设置' },
@@ -412,7 +412,8 @@ function App() {
           <Route path="/opportunities" element={<OpportunitiesPage />} />
           <Route path="/portfolio" element={<StocksPage />} />
           <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/history" element={<HistoryPage />} />
+          <Route path="/history" element={<Navigate to="/intel?tab=report" replace />} />
+          <Route path="/intel" element={<IntelCenterPage />} />
           <Route path="/alerts" element={<PriceAlertsPage />} />
           <Route path="/datasources" element={<DataSourcesPage />} />
           <Route path="/mcp" element={<MCPPage />} />

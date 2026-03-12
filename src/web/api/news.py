@@ -31,6 +31,108 @@ class NewsItemResponse(BaseModel):
     url: str = ""
 
 
+class NewsPagedResponse(BaseModel):
+    items: list[NewsItemResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+    ai_extension: dict
+
+
+def _build_symbol_context(
+    db: Session,
+    symbols: str,
+    names: str,
+) -> tuple[dict[str, str], list[str], dict[str, str]]:
+    """解析 symbol/name 过滤上下文，返回 (stock_map, symbol_list, passed_symbol_names)。"""
+    all_stocks = db.query(Stock).all()
+    stock_map = {s.symbol: s.name for s in all_stocks}
+    name_to_symbol = {s.name: s.symbol for s in all_stocks}
+
+    # 解析股票 - 优先使用 names 参数
+    if names:
+        name_list = [n.strip() for n in names.split(",") if n.strip()]
+        symbol_list = [name_to_symbol.get(n) for n in name_list if name_to_symbol.get(n)]
+        passed_symbol_names = {name_to_symbol.get(n, ""): n for n in name_list if name_to_symbol.get(n)}
+    elif symbols:
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        passed_symbol_names = {s: stock_map.get(s, s) for s in symbol_list}
+    else:
+        symbol_list = list(stock_map.keys())
+        passed_symbol_names = stock_map
+
+    return stock_map, symbol_list, passed_symbol_names
+
+
+async def _collect_news_rows(
+    db: Session,
+    symbols: str,
+    names: str,
+    hours: int,
+    filter_related: bool,
+    source: str,
+) -> tuple[list[NewsItemResponse], dict[str, str]]:
+    """采集并过滤新闻，返回新闻列表和股票映射。"""
+    stock_map, symbol_list, passed_symbol_names = _build_symbol_context(db, symbols, names)
+    if not symbol_list:
+        return [], stock_map
+
+    source_filters = {s.strip() for s in source.split(",") if s.strip()} if source else set()
+
+    # 构建匹配关键词（股票代码 + 股票名称）
+    keywords = set(symbol_list)
+    for sym in symbol_list:
+        if sym in stock_map:
+            keywords.add(stock_map[sym])
+
+    # 基于数据源配置构建采集器，直接传递股票名称映射避免重复查库
+    collector = NewsCollector.from_database()
+    news_items = await collector.fetch_all(
+        symbols=symbol_list,
+        since_hours=hours,
+        symbol_names=passed_symbol_names,
+    )
+
+    def is_related(item: NewsItem) -> bool:
+        """判断新闻是否与自选股相关"""
+        if item.source == "eastmoney":
+            return True
+        if item.symbols and any(s in symbol_list for s in item.symbols):
+            return True
+        text = item.title + (item.content or "")
+        return any(kw in text for kw in keywords)
+
+    rows: list[NewsItemResponse] = []
+    for item in news_items:
+        if source_filters and item.source not in source_filters:
+            continue
+        if filter_related and not is_related(item):
+            continue
+
+        matched_symbols = []
+        text = item.title + (item.content or "")
+        for sym, name in stock_map.items():
+            if sym in symbol_list and (sym in text or name in text):
+                matched_symbols.append(sym)
+
+        rows.append(
+            NewsItemResponse(
+                source=item.source,
+                source_label=SOURCE_LABELS.get(item.source, item.source),
+                external_id=item.external_id,
+                title=item.title,
+                content=item.content,
+                publish_time=item.publish_time.strftime("%Y-%m-%d %H:%M"),
+                symbols=matched_symbols or item.symbols,
+                importance=item.importance,
+                url=item.url,
+            )
+        )
+
+    return rows, stock_map
+
+
 @router.get("", response_model=list[NewsItemResponse])
 async def get_news(
     symbols: str = Query(default="", description="股票代码，逗号分隔"),
@@ -50,88 +152,75 @@ async def get_news(
     - limit: 返回数量限制
     - filter_related: 是否只显示与自选股相关的新闻
     """
-    # 获取所有自选股（用于匹配）
-    all_stocks = db.query(Stock).all()
-    stock_map = {s.symbol: s.name for s in all_stocks}
-    name_to_symbol = {s.name: s.symbol for s in all_stocks}
+    rows, _ = await _collect_news_rows(
+        db=db,
+        symbols=symbols,
+        names=names,
+        hours=hours,
+        filter_related=filter_related,
+        source=source,
+    )
+    return rows[:limit]
 
-    # 解析股票 - 优先使用 names 参数
-    if names:
-        # 前端直接传递股票名称
-        name_list = [n.strip() for n in names.split(",") if n.strip()]
-        # 转换为 symbol 列表（用于匹配和返回）
-        symbol_list = [name_to_symbol.get(n) for n in name_list if name_to_symbol.get(n)]
-        # 直接使用传入的名称构建 symbol_names
-        passed_symbol_names = {name_to_symbol.get(n, ""): n for n in name_list if name_to_symbol.get(n)}
-    elif symbols:
-        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
-        passed_symbol_names = {s: stock_map.get(s, s) for s in symbol_list}
-    else:
-        symbol_list = list(stock_map.keys())
-        passed_symbol_names = stock_map
 
-    if not symbol_list:
-        return []
-
-    source_filters = {s.strip() for s in source.split(",") if s.strip()} if source else set()
-
-    # 构建匹配关键词（股票代码 + 股票名称）
-    keywords = set(symbol_list)
-    for sym in symbol_list:
-        if sym in stock_map:
-            keywords.add(stock_map[sym])
-
-    # 基于数据源配置构建采集器，直接传递股票名称映射避免重复查库
-    collector = NewsCollector.from_database()
-    news_items = await collector.fetch_all(
-        symbols=symbol_list,
-        since_hours=hours,
-        symbol_names=passed_symbol_names,  # 直接传递已有的股票名称映射
+@router.get("/paged", response_model=NewsPagedResponse)
+async def get_news_paged(
+    symbols: str = Query(default="", description="股票代码，逗号分隔"),
+    names: str = Query(default="", description="股票名称，逗号分隔（优先使用）"),
+    hours: int = Query(default=168, ge=1, le=720, description="时间范围（小时）"),
+    filter_related: bool = Query(default=True, description="只显示相关新闻"),
+    source: str = Query(default="", description="来源过滤，逗号分隔"),
+    q: str = Query(default="", description="关键词搜索（标题/正文/来源/股票）"),
+    page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(default=10, ge=1, le=100, description="每页条数"),
+    db: Session = Depends(get_db),
+):
+    """分页获取新闻列表（支持关键词搜索）。"""
+    rows, stock_map = await _collect_news_rows(
+        db=db,
+        symbols=symbols,
+        names=names,
+        hours=hours,
+        filter_related=filter_related,
+        source=source,
     )
 
-    def is_related(item: NewsItem) -> bool:
-        """判断新闻是否与自选股相关"""
-        # 公告类天然与股票相关
-        if item.source == "eastmoney":
-            return True
-        # 已标记相关股票
-        if item.symbols and any(s in symbol_list for s in item.symbols):
-            return True
-        # 标题或内容包含关键词
-        text = item.title + (item.content or "")
-        return any(kw in text for kw in keywords)
+    keyword = (q or "").strip().lower()
+    if keyword:
+        filtered: list[NewsItemResponse] = []
+        for row in rows:
+            symbol_names = [stock_map.get(sym, "") for sym in row.symbols]
+            haystack = " ".join(
+                [
+                    row.title,
+                    row.content,
+                    row.source,
+                    row.source_label,
+                    " ".join(row.symbols),
+                    " ".join(symbol_names),
+                ]
+            ).lower()
+            if keyword in haystack:
+                filtered.append(row)
+        rows = filtered
 
-    result = []
-    for item in news_items:
-        if source_filters and item.source not in source_filters:
-            continue
-        # 过滤不相关的新闻
-        if filter_related and not is_related(item):
-            continue
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = rows[start:end]
 
-        # 标记匹配的股票
-        matched_symbols = []
-        text = item.title + (item.content or "")
-        for sym, name in stock_map.items():
-            if sym in symbol_list and (sym in text or name in text):
-                matched_symbols.append(sym)
-
-        result.append(NewsItemResponse(
-            source=item.source,
-            source_label=SOURCE_LABELS.get(item.source, item.source),
-            external_id=item.external_id,
-            title=item.title,
-            content=item.content,
-            publish_time=item.publish_time.strftime("%Y-%m-%d %H:%M"),
-            symbols=matched_symbols or item.symbols,
-            importance=item.importance,
-            url=item.url,
-        ))
-
-        if len(result) >= limit:
-            break
-
-    return result
+    return NewsPagedResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=end < total,
+        ai_extension={
+            "user_note": "reserved",
+            "conversation_mode": "reserved",
+            "memory_scope": "reserved",
+        },
+    )
 
 
 @router.get("/sources")
