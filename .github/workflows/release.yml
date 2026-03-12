@@ -4,23 +4,23 @@ on:
   push:
     tags:
       # PanWatch tags are like 0.2.3 (no "v" prefix)
-      - '*.*.*'
+      - "*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Docker tag to publish (e.g. 0.2.3)'
+        description: "Docker tag to publish (e.g. 0.2.3)"
         required: true
         type: string
       push_latest:
-        description: 'Also push :latest'
+        description: "Also push :latest"
         required: false
         type: boolean
         default: true
       platforms:
-        description: 'Target platforms'
+        description: "Target platforms"
         required: false
         type: string
-        default: 'linux/amd64,linux/arm64'
+        default: "linux/amd64,linux/arm64"
 
 env:
   REGISTRY: ghcr.io
