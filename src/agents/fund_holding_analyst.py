@@ -23,7 +23,7 @@ from src.core.signals.structured_output import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "fund_holding_analyst.txt"
+PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "fund_holding_analyst.md"
 
 # 建议类型映射
 FUND_ACTION_MAP = {

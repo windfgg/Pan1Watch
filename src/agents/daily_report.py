@@ -33,7 +33,7 @@ DAILY_ACTION_MAP = {
     "暂时回避": {"action": "avoid", "label": "暂时回避"},
 }
 
-PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "daily_report.txt"
+PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "daily_report.md"
 
 
 class DailyReportAgent(BaseAgent):

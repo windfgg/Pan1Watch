@@ -52,7 +52,7 @@ SUGGESTION_TYPES = {
 }
 
 PROMPT_PATH = Path(__file__).parent.parent.parent / \
-    "prompts" / "intraday_monitor.txt"
+    "prompts" / "intraday_monitor.md"
 
 
 class IntradayMonitorAgent(BaseAgent):
