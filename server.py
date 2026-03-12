@@ -39,6 +39,7 @@ from src.agents.news_digest import NewsDigestAgent
 from src.agents.chart_analyst import ChartAnalystAgent
 from src.agents.intraday_monitor import IntradayMonitorAgent
 from src.agents.premarket_outlook import PremarketOutlookAgent
+from src.agents.fund_holding_analyst import FundHoldingAnalystAgent
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,8 @@ def setup_ssl():
 
     import certifi
 
-    bundle_path = os.path.join(os.path.dirname(__file__), "data", "ca-bundle.pem")
+    bundle_path = os.path.join(os.path.dirname(
+        __file__), "data", "ca-bundle.pem")
     os.makedirs(os.path.dirname(bundle_path), exist_ok=True)
 
     need_rebuild = not os.path.exists(bundle_path) or os.path.getmtime(
@@ -203,7 +205,8 @@ def seed_agents():
     """初始化内置 Agent 配置"""
     db = SessionLocal()
     for spec in AGENT_SEED_SPECS:
-        existing = db.query(AgentConfig).filter(AgentConfig.name == spec.name).first()
+        existing = db.query(AgentConfig).filter(
+            AgentConfig.name == spec.name).first()
         if not existing:
             db.add(
                 AgentConfig(
@@ -323,6 +326,18 @@ def seed_data_sources():
             "supports_batch": True,
             "test_symbols": ["601127", "600519", "300750"],
         },
+        {
+            "name": "天天基金",
+            "type": "quote",
+            "provider": "eastmoney_fund",
+            "config": {
+                "description": "基金实时估值接口，测试代码请填写 6 位基金代码",
+            },
+            "enabled": False,
+            "priority": 1,
+            "supports_batch": True,
+            "test_symbols": ["001186", "161725"],
+        },
         # 事件日历数据源（基于公告结构化）
         {
             "name": "东方财富事件日历",
@@ -364,10 +379,27 @@ def seed_data_sources():
     ]
 
     for source_data in sources:
+        # 历史兼容：基金行情源旧名称为“天天基金估值”，统一改为“天天基金”。
+        if (
+            source_data.get("type") == "quote"
+            and source_data.get("provider") == "eastmoney_fund"
+        ):
+            legacy = (
+                db.query(DataSource)
+                .filter(
+                    DataSource.name == "天天基金估值",
+                    DataSource.provider == "eastmoney_fund",
+                    DataSource.type == "quote",
+                )
+                .first()
+            )
+            if legacy:
+                legacy.name = source_data["name"]
+
         existing = (
             db.query(DataSource)
             .filter(
-                DataSource.name == source_data["name"],
+                DataSource.type == source_data["type"],
                 DataSource.provider == source_data["provider"],
             )
             .first()
@@ -375,7 +407,8 @@ def seed_data_sources():
         if existing:
             # 更新已存在记录的新字段（保留用户可能修改的配置）
             if existing.supports_batch != source_data.get("supports_batch", False):
-                existing.supports_batch = source_data.get("supports_batch", False)
+                existing.supports_batch = source_data.get(
+                    "supports_batch", False)
             if not existing.test_symbols:  # 只在空时更新
                 existing.test_symbols = source_data.get("test_symbols", [])
         else:
@@ -396,7 +429,8 @@ def load_watchlist_for_agent(agent_name: str) -> list[StockConfig]:
     db = SessionLocal()
     try:
         stock_agents = (
-            db.query(StockAgent).filter(StockAgent.agent_name == agent_name).all()
+            db.query(StockAgent).filter(
+                StockAgent.agent_name == agent_name).all()
         )
         stock_ids = [sa.stock_id for sa in stock_agents]
         if not stock_ids:
@@ -430,7 +464,8 @@ def load_portfolio_for_agent(agent_name: str) -> PortfolioInfo:
     try:
         # 获取 Agent 关联的股票 ID
         stock_agents = (
-            db.query(StockAgent).filter(StockAgent.agent_name == agent_name).all()
+            db.query(StockAgent).filter(
+                StockAgent.agent_name == agent_name).all()
         )
         stock_ids = set(sa.stock_id for sa in stock_agents)
         if not stock_ids:
@@ -553,7 +588,8 @@ def _get_proxy() -> str:
     """从 app_settings 获取 http_proxy"""
     db = SessionLocal()
     try:
-        setting = db.query(AppSettings).filter(AppSettings.key == "http_proxy").first()
+        setting = db.query(AppSettings).filter(
+            AppSettings.key == "http_proxy").first()
         return setting.value if setting and setting.value else ""
     finally:
         db.close()
@@ -580,19 +616,22 @@ def resolve_ai_model(
 
         # 1. stock_agent 级别覆盖
         if stock_agent_id:
-            sa = db.query(StockAgent).filter(StockAgent.id == stock_agent_id).first()
+            sa = db.query(StockAgent).filter(
+                StockAgent.id == stock_agent_id).first()
             if sa and sa.ai_model_id:
                 model_id = sa.ai_model_id
 
         # 2. agent 级别默认
         if not model_id:
-            agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+            agent = db.query(AgentConfig).filter(
+                AgentConfig.name == agent_name).first()
             if agent and agent.ai_model_id:
                 model_id = agent.ai_model_id
 
         # 3. 系统默认
         if not model_id:
-            default_model = db.query(AIModel).filter(AIModel.is_default == True).first()
+            default_model = db.query(AIModel).filter(
+                AIModel.is_default == True).first()
             if default_model:
                 model_id = default_model.id
 
@@ -609,7 +648,8 @@ def resolve_ai_model(
         if not model:
             return None, None
 
-        service = db.query(AIService).filter(AIService.id == model.service_id).first()
+        service = db.query(AIService).filter(
+            AIService.id == model.service_id).first()
         if model:
             db.expunge(model)
         if service:
@@ -629,13 +669,15 @@ def resolve_notify_channels(
 
         # 1. stock_agent 级别覆盖
         if stock_agent_id:
-            sa = db.query(StockAgent).filter(StockAgent.id == stock_agent_id).first()
+            sa = db.query(StockAgent).filter(
+                StockAgent.id == stock_agent_id).first()
             if sa and sa.notify_channel_ids:
                 channel_ids = sa.notify_channel_ids
 
         # 2. agent 级别默认
         if channel_ids is None:
-            agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+            agent = db.query(AgentConfig).filter(
+                AgentConfig.name == agent_name).first()
             if agent and agent.notify_channel_ids:
                 channel_ids = agent.notify_channel_ids
 
@@ -670,7 +712,8 @@ def _build_notifier(channels: list[NotifyChannel]) -> NotifierManager:
     """根据解析后的渠道列表构建 NotifierManager"""
     settings = Settings()
     # allow UI override via app_settings
-    quiet_hours = _get_app_setting("notify_quiet_hours") or settings.notify_quiet_hours
+    quiet_hours = _get_app_setting(
+        "notify_quiet_hours") or settings.notify_quiet_hours
     retry_attempts_raw = _get_app_setting("notify_retry_attempts")
     backoff_raw = _get_app_setting("notify_retry_backoff_seconds")
     overrides_raw = (
@@ -761,6 +804,7 @@ AGENT_REGISTRY: dict[str, type] = {
     "news_digest": NewsDigestAgent,
     "chart_analyst": ChartAnalystAgent,
     "intraday_monitor": IntradayMonitorAgent,
+    "fund_holding_analyst": FundHoldingAnalystAgent,
 }
 
 
@@ -850,7 +894,8 @@ def get_agent_execution_mode(agent_name: str) -> str:
     """获取 Agent 的执行模式"""
     db = SessionLocal()
     try:
-        agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+        agent = db.query(AgentConfig).filter(
+            AgentConfig.name == agent_name).first()
         return agent.execution_mode if agent and agent.execution_mode else "batch"
     finally:
         db.close()
@@ -860,7 +905,8 @@ def get_agent_config(agent_name: str) -> dict:
     """获取 Agent 的配置参数"""
     db = SessionLocal()
     try:
-        agent = db.query(AgentConfig).filter(AgentConfig.name == agent_name).first()
+        agent = db.query(AgentConfig).filter(
+            AgentConfig.name == agent_name).first()
         return agent.config if agent and agent.config else {}
     finally:
         db.close()
@@ -909,7 +955,8 @@ async def trigger_agent(agent_name: str) -> str:
                 for stock in watchlist:
                     result = await agent.run_single(context, stock.symbol)
                     if result:
-                        results.append(f"{stock.name}: {result.content[:100]}...")
+                        results.append(
+                            f"{stock.name}: {result.content[:100]}...")
                 msg = "\n\n".join(results) if results else "无异动"
                 record_agent_run(
                     agent_name=agent_name,
@@ -987,7 +1034,8 @@ async def trigger_agent_for_stock(
     portfolio = load_portfolio_for_stock(stock.id)
 
     model, service = resolve_ai_model(agent_name, stock_agent_id)
-    channels = [] if suppress_notify else resolve_notify_channels(agent_name, stock_agent_id)
+    channels = [] if suppress_notify else resolve_notify_channels(
+        agent_name, stock_agent_id)
     _log_trigger_info(agent_name, [stock], model, service, channels)
 
     ai_client = _build_ai_client(model, service, proxy)

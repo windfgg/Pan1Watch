@@ -1,5 +1,7 @@
 """数据采集器 - 基于腾讯股票 HTTP API（稳定可靠，无 SSL 问题）"""
 import logging
+import json
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 
@@ -12,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 # 腾讯股票行情 API（HTTP，GBK 编码）
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
+FUND_GZ_URL = "http://fundgz.1234567.com.cn/js/{code}.js"
 
 # 预定义指数
 CN_INDICES = [
@@ -142,6 +145,132 @@ def _fetch_tencent_quotes(symbols: list[str]) -> list[dict]:
     return results
 
 
+def _parse_fund_gz_line(raw: str) -> dict | None:
+    """解析天天基金估值接口返回: jsonpgz({...});"""
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    m = re.search(r"jsonpgz\((.*)\)\s*;?\s*$", text)
+    if not m:
+        return None
+
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None
+
+    fundcode = str(data.get("fundcode") or "").strip()
+    if not fundcode:
+        return None
+
+    def _f(v: str | None) -> float | None:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    prev_close = _f(data.get("dwjz"))
+    current_price = _f(data.get("gsz"))
+    change_pct = _f(data.get("gszzl"))
+    change_amount = None
+    if prev_close is not None and current_price is not None:
+        change_amount = current_price - prev_close
+
+    return {
+        "name": str(data.get("name") or ""),
+        "symbol": fundcode,
+        "current_price": current_price,
+        "prev_close": prev_close,
+        "open_price": None,
+        "volume": None,
+        "change_amount": change_amount,
+        "change_pct": change_pct,
+        "high_price": None,
+        "low_price": None,
+        "turnover": None,
+        "turnover_rate": None,
+        "pe_ratio": None,
+        "circulating_market_value": None,
+        "total_market_value": None,
+        "gztime": str(data.get("gztime") or ""),
+        "jzrq": str(data.get("jzrq") or ""),
+    }
+
+
+def _fetch_fund_quotes(symbols: list[str]) -> list[dict]:
+    """批量获取基金实时估值（天天基金）。
+    
+    对于场外基金（没有实时估值），会回退到基金详情接口获取最新净值。
+    """
+    if not symbols:
+        return []
+
+    results: list[dict] = []
+    # 去重后按输入顺序请求
+    seen: set[str] = set()
+    ordered = []
+    for s in symbols:
+        code = str(s).strip()
+        if not code:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        ordered.append(code)
+
+    # 延迟导入避免循环引用
+    from src.collectors.fund_collector import fetch_fund_performance
+
+    with httpx.Client() as client:
+        for code in ordered:
+            try:
+                resp = client.get(FUND_GZ_URL.format(code=code), timeout=10)
+                parsed = _parse_fund_gz_line(resp.text)
+                if parsed and parsed.get("current_price") is not None:
+                    results.append(parsed)
+                    continue
+            except Exception as e:
+                logger.debug(f"获取基金估值失败 {code}: {e}")
+
+            # 估值接口无数据，尝试从基金详情获取最新净值
+            try:
+                perf = fetch_fund_performance(code)
+                if perf and perf.get("points"):
+                    latest = perf["points"][-1]
+                    nav = latest.get("value")
+                    ts = latest.get("ts")
+                    jzrq = ""
+                    if ts:
+                        from datetime import datetime
+                        jzrq = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                    if nav is not None:
+                        results.append({
+                            "symbol": code,
+                            "name": perf.get("name") or code,
+                            "current_price": None,  # 无实时估值
+                            "prev_close": nav,      # 最新单位净值
+                            "change": None,
+                            "change_pct": None,
+                            "volume": None,
+                            "amount": None,
+                            "turnover_rate": None,
+                            "volume_ratio": None,
+                            "total_market_value": None,
+                            "gztime": "",
+                            "jzrq": jzrq,
+                        })
+            except Exception as e:
+                logger.debug(f"获取基金净值失败 {code}: {e}")
+
+    return results
+
+
 class BaseCollector(ABC):
     """数据采集器抽象基类"""
 
@@ -177,7 +306,8 @@ class AkshareCollector(BaseCollector):
         return []
 
     def _get_cn_index(self) -> list[IndexData]:
-        tencent_symbols = [f"{prefix}{symbol}" for symbol, _, prefix in CN_INDICES]
+        tencent_symbols = [
+            f"{prefix}{symbol}" for symbol, _, prefix in CN_INDICES]
         try:
             items = _fetch_tencent_quotes(tencent_symbols)
         except Exception as e:
