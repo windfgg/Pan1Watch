@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, useLocation, Navigate } from 'react-router-dom'
-import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles } from 'lucide-react'
+import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Plug, RefreshCw } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
+import { RefreshProvider, useRefresh } from '@/hooks/use-global-refresh'
 import { appApi, fetchAPI, isAuthenticated, logout } from '@panwatch/api'
 import DashboardPage from '@/pages/Dashboard'
 import OpportunitiesPage from '@/pages/Opportunities'
@@ -11,6 +12,7 @@ import SettingsPage from '@/pages/Settings'
 import DataSourcesPage from '@/pages/DataSources'
 import HistoryPage from '@/pages/History'
 import PriceAlertsPage from '@/pages/PriceAlerts'
+import MCPPage from '@/pages/MCP'
 import LoginPage from '@/pages/Login'
 import LogsModal from '@panwatch/biz-ui/components/logs-modal'
 import AmbientBackground from '@panwatch/biz-ui/components/AmbientBackground'
@@ -25,12 +27,68 @@ const navItems = [
   { to: '/agents', icon: Bot, label: 'Agent' },
   { to: '/history', icon: Clock, label: '历史' },
   { to: '/datasources', icon: Database, label: '数据源' },
+  { to: '/mcp', icon: Plug, label: 'MCP' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
-const desktopPrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[3]]
-const desktopMoreNavItems = [navItems[4], navItems[5], navItems[6], navItems[7]]
-const mobilePrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[3]]
-const mobileMoreNavItems = [navItems[4], navItems[5], navItems[6], navItems[7]]
+const desktopPrimaryNavItems = navItems.slice(0, 4)
+const desktopMoreNavItems = navItems.slice(4)
+const mobilePrimaryNavItems = navItems.slice(0, 4)
+const mobileMoreNavItems = navItems.slice(4)
+
+// 刷新按钮组件（带自动刷新进度环）
+function RefreshButton({ size = 'default' }: { size?: 'default' | 'sm' }) {
+  const { loading, triggerRefresh, autoRefreshProgress } = useRefresh()
+  const sizeClasses = size === 'sm' ? 'w-8 h-8' : 'w-9 h-9'
+  const iconSize = size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'
+  const ringSize = size === 'sm' ? 28 : 32
+  const strokeWidth = 2
+  const radius = (ringSize - strokeWidth) / 2
+  const circumference = 2 * Math.PI * radius
+  const { enabled, progress } = autoRefreshProgress
+  const strokeDashoffset = circumference * (1 - progress)
+
+  return (
+    <button
+      onClick={triggerRefresh}
+      disabled={loading}
+      className={`${sizeClasses} rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all disabled:opacity-50 relative`}
+      title="刷新"
+    >
+      {/* 进度环 */}
+      {enabled && !loading && (
+        <svg
+          className="absolute inset-0 -rotate-90 pointer-events-none"
+          width={ringSize}
+          height={ringSize}
+          style={{ margin: 'auto' }}
+        >
+          <circle
+            cx={ringSize / 2}
+            cy={ringSize / 2}
+            r={radius}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity={0.15}
+            strokeWidth={strokeWidth}
+          />
+          <circle
+            cx={ringSize / 2}
+            cy={ringSize / 2}
+            r={radius}
+            fill="none"
+            stroke="hsl(var(--primary))"
+            strokeWidth={strokeWidth}
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+            style={{ transition: 'stroke-dashoffset 0.3s ease-out' }}
+          />
+        </svg>
+      )}
+      <RefreshCw className={`${iconSize} ${loading ? 'animate-spin' : ''}`} />
+    </button>
+  )
+}
 
 // 认证守卫组件
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -132,11 +190,13 @@ function App() {
   }
 
   return (
+    <RefreshProvider>
     <RequireAuth>
     <div className="min-h-screen pb-16 md:pb-0 relative overflow-x-clip bg-background">
       <AmbientBackground />
       {/* Desktop Floating Nav */}
       <div className="sticky top-0 z-50 px-4 md:px-6 pt-3 md:pt-4 pb-2 hidden md:block">
+        <div className="w-full max-w-[1480px] mx-auto">
         <header className="card px-4 md:px-5">
           <div className="h-14 flex items-center justify-between">
             {/* Logo */}
@@ -213,8 +273,9 @@ function App() {
               </div>
             </nav>
 
-            {/* Theme Toggle & Logout */}
+            {/* Refresh & Theme Toggle & Logout */}
             <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
+              {(location.pathname === '/' || location.pathname === '/portfolio') && <RefreshButton />}
               <button
                 onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
                 className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
@@ -248,6 +309,7 @@ function App() {
             </div>
           </div>
         </header>
+        </div>
       </div>
 
       {/* Mobile Top Bar */}
@@ -262,6 +324,7 @@ function App() {
               {version && <span className="text-[10px] text-muted-foreground/60 font-normal">v{version}</span>}
             </NavLink>
             <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
+              {(location.pathname === '/' || location.pathname === '/portfolio') && <RefreshButton size="sm" />}
               <button
                 onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
                 className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
@@ -343,7 +406,7 @@ function App() {
       </nav>
 
       {/* Content */}
-      <main className="px-4 md:px-6 py-4 md:py-6 w-full">
+      <main className="px-4 md:px-6 py-4 md:py-6 w-full max-w-[1480px] mx-auto">
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/opportunities" element={<OpportunitiesPage />} />
@@ -352,6 +415,7 @@ function App() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/alerts" element={<PriceAlertsPage />} />
           <Route path="/datasources" element={<DataSourcesPage />} />
+          <Route path="/mcp" element={<MCPPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
@@ -390,6 +454,7 @@ function App() {
       </Dialog>
     </div>
     </RequireAuth>
+    </RefreshProvider>
   )
 }
 
