@@ -24,6 +24,7 @@ from src.web.api import (
     context,
     recommendations,
     dashboard,
+    mcp,
 )
 from src.web.api import insights
 from src.web.api.auth import get_current_user
@@ -49,6 +50,8 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 # 市场指数（公共数据，无需登录）
 app.include_router(market.router, prefix="/api/market", tags=["market"])
+# MCP 接口（支持 Bearer 或 Basic 认证）
+app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 
 # 需要登录的路由
 protected = [Depends(get_current_user)]

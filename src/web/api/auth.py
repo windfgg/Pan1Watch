@@ -48,12 +48,14 @@ def get_jwt_secret() -> str:
     # 从数据库读取或首次生成
     db = SessionLocal()
     try:
-        setting = db.query(AppSettings).filter(AppSettings.key == JWT_SECRET_KEY).first()
+        setting = db.query(AppSettings).filter(
+            AppSettings.key == JWT_SECRET_KEY).first()
         if setting:
             _jwt_secret = setting.value
         else:
             _jwt_secret = secrets.token_hex(32)
-            db.add(AppSettings(key=JWT_SECRET_KEY, value=_jwt_secret, description="JWT签名密钥(自动生成)"))
+            db.add(AppSettings(key=JWT_SECRET_KEY,
+                   value=_jwt_secret, description="JWT签名密钥(自动生成)"))
             db.commit()
         return _jwt_secret
     finally:
@@ -106,34 +108,40 @@ def verify_token(token: str) -> bool:
 
 def get_stored_username(db: Session) -> Optional[str]:
     """获取存储的用户名"""
-    setting = db.query(AppSettings).filter(AppSettings.key == AUTH_USERNAME_KEY).first()
+    setting = db.query(AppSettings).filter(
+        AppSettings.key == AUTH_USERNAME_KEY).first()
     return setting.value if setting else None
 
 
 def set_stored_username(db: Session, username: str):
     """设置用户名"""
-    setting = db.query(AppSettings).filter(AppSettings.key == AUTH_USERNAME_KEY).first()
+    setting = db.query(AppSettings).filter(
+        AppSettings.key == AUTH_USERNAME_KEY).first()
     if setting:
         setting.value = username
     else:
-        setting = AppSettings(key=AUTH_USERNAME_KEY, value=username, description="认证用户名")
+        setting = AppSettings(key=AUTH_USERNAME_KEY,
+                              value=username, description="认证用户名")
         db.add(setting)
     db.commit()
 
 
 def get_password_hash(db: Session) -> Optional[str]:
     """获取存储的密码哈希"""
-    setting = db.query(AppSettings).filter(AppSettings.key == PASSWORD_HASH_KEY).first()
+    setting = db.query(AppSettings).filter(
+        AppSettings.key == PASSWORD_HASH_KEY).first()
     return setting.value if setting else None
 
 
 def set_password_hash(db: Session, password_hash: str):
     """设置密码哈希"""
-    setting = db.query(AppSettings).filter(AppSettings.key == PASSWORD_HASH_KEY).first()
+    setting = db.query(AppSettings).filter(
+        AppSettings.key == PASSWORD_HASH_KEY).first()
     if setting:
         setting.value = password_hash
     else:
-        setting = AppSettings(key=PASSWORD_HASH_KEY, value=password_hash, description="认证密码哈希")
+        setting = AppSettings(key=PASSWORD_HASH_KEY,
+                              value=password_hash, description="认证密码哈希")
         db.add(setting)
     db.commit()
 
