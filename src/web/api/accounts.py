@@ -20,7 +20,7 @@ _hkd_rate_cache: dict = {"rate": 0.92, "ts": 0}  # 港币默认汇率 0.92
 _usd_rate_cache: dict = {"rate": 7.25, "ts": 0}  # 美元默认汇率 7.25
 EXCHANGE_RATE_TTL = 3600  # 1 小时缓存
 
-SUPPORTED_ACCOUNT_MARKETS = {"CN", "HK", "US"}
+SUPPORTED_ACCOUNT_MARKETS = {"CN", "HK", "US", "FUND"}
 SUPPORTED_CURRENCIES = {"CNY", "HKD", "USD"}
 MARKET_CURRENCY_MAP = {
     "CN": "CNY",
@@ -119,7 +119,7 @@ def convert_amount(amount: float, from_currency: str, to_currency: str, rates_to
 def normalize_account_market(value: str | None) -> str:
     market = (value or "CN").upper()
     if market not in SUPPORTED_ACCOUNT_MARKETS:
-        raise HTTPException(400, "market 仅支持 CN/HK/US")
+        raise HTTPException(400, "market 仅支持 CN/HK/US/FUND")
     return market
 
 
@@ -128,6 +128,12 @@ def normalize_currency(value: str | None) -> str:
     if currency not in SUPPORTED_CURRENCIES:
         raise HTTPException(400, "base_currency 仅支持 CNY/HKD/USD")
     return currency
+
+
+def validate_market_currency_pair(market: str, currency: str) -> None:
+    expected = MARKET_CURRENCY_MAP.get(market)
+    if expected and currency != expected:
+        raise HTTPException(400, f"{market} 账户的 base_currency 需为 {expected}")
 
 
 # ========== Pydantic Models ==========
@@ -224,6 +230,7 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     """创建账户"""
     market = normalize_account_market(data.market)
     base_currency = normalize_currency(data.base_currency)
+    validate_market_currency_pair(market, base_currency)
     account = Account(
         name=data.name,
         available_funds=data.available_funds,
@@ -248,10 +255,15 @@ def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(g
         account.name = data.name
     if data.available_funds is not None:
         account.available_funds = data.available_funds
+    next_market = account.market
+    next_currency = account.base_currency
     if data.market is not None:
-        account.market = normalize_account_market(data.market)
+        next_market = normalize_account_market(data.market)
     if data.base_currency is not None:
-        account.base_currency = normalize_currency(data.base_currency)
+        next_currency = normalize_currency(data.base_currency)
+    validate_market_currency_pair(next_market, next_currency)
+    account.market = next_market
+    account.base_currency = next_currency
     if data.enabled is not None:
         account.enabled = data.enabled
 
@@ -289,7 +301,8 @@ def list_positions(
     if stock_id:
         query = query.filter(Position.stock_id == stock_id)
 
-    positions = query.order_by(Position.account_id.asc(), Position.sort_order.asc(), Position.id.asc()).all()
+    positions = query.order_by(Position.account_id.asc(
+    ), Position.sort_order.asc(), Position.id.asc()).all()
     result = []
     for pos in positions:
         result.append({
@@ -326,7 +339,8 @@ def create_position(data: PositionCreate, db: Session = Depends(get_db)):
         Position.stock_id == data.stock_id,
     ).first()
     if existing:
-        raise HTTPException(400, f"账户 {account.name} 已有 {stock.name} 的持仓，请编辑现有持仓")
+        raise HTTPException(
+            400, f"账户 {account.name} 已有 {stock.name} 的持仓，请编辑现有持仓")
 
     max_order = db.query(func.max(Position.sort_order)).filter(
         Position.account_id == data.account_id
@@ -452,7 +466,8 @@ def get_portfolio_summary(
 
     # 获取账户
     if account_id:
-        accounts = db.query(Account).filter(Account.id == account_id, Account.enabled == True).all()
+        accounts = db.query(Account).filter(
+            Account.id == account_id, Account.enabled == True).all()
     else:
         accounts = db.query(Account).filter(Account.enabled == True).all()
 
@@ -478,7 +493,8 @@ def get_portfolio_summary(
         for pos in acc.positions:
             all_stock_ids.add(pos.stock_id)
 
-    stocks = db.query(Stock).filter(Stock.id.in_(all_stock_ids)).all() if all_stock_ids else []
+    stocks = db.query(Stock).filter(Stock.id.in_(
+        all_stock_ids)).all() if all_stock_ids else []
     stock_map = {s.id: s for s in stocks}
 
     # 获取实时行情（可选）
@@ -511,7 +527,8 @@ def get_portfolio_summary(
         account_market = (acc.market or "CN").upper()
         account_base_currency = (acc.base_currency or "").upper()
         if account_base_currency not in SUPPORTED_CURRENCIES:
-            account_base_currency = MARKET_CURRENCY_MAP.get(account_market, "CNY")
+            account_base_currency = MARKET_CURRENCY_MAP.get(
+                account_market, "CNY")
 
         positions_sorted = sorted(
             list(acc.positions or []),
@@ -527,8 +544,10 @@ def get_portfolio_summary(
             change_pct = quote["change_pct"] if quote else None
             prev_close = quote["prev_close"] if quote else None
 
-            position_currency = MARKET_CURRENCY_MAP.get((stock.market or "CN").upper(), "CNY")
-            rate_to_display = convert_amount(1.0, position_currency, display_currency_norm, rates_to_cny)
+            position_currency = MARKET_CURRENCY_MAP.get(
+                (stock.market or "CN").upper(), "CNY")
+            rate_to_display = convert_amount(
+                1.0, position_currency, display_currency_norm, rates_to_cny)
 
             market_value = None
             market_value_display = None
@@ -538,7 +557,8 @@ def get_portfolio_summary(
             day_pnl_pct = None
 
             cost_native = pos.cost_price * pos.quantity
-            cost_display = convert_amount(cost_native, position_currency, display_currency_norm, rates_to_cny)
+            cost_display = convert_amount(
+                cost_native, position_currency, display_currency_norm, rates_to_cny)
             acc_cost += cost_display
 
             if current_price is not None:
@@ -550,7 +570,8 @@ def get_portfolio_summary(
                     rates_to_cny,
                 )
                 pnl_display = market_value_display - cost_display
-                pnl_pct = (pnl_display / cost_display * 100) if cost_display > 0 else 0
+                pnl_pct = (pnl_display / cost_display *
+                           100) if cost_display > 0 else 0
 
                 if prev_close is not None and prev_close > 0:
                     day_cost_native = prev_close * pos.quantity
@@ -560,19 +581,20 @@ def get_portfolio_summary(
                         display_currency_norm,
                         rates_to_cny,
                     )
-                    day_pnl_native = (current_price - prev_close) * pos.quantity
+                    day_pnl_native = (
+                        current_price - prev_close) * pos.quantity
                     day_pnl_display = convert_amount(
                         day_pnl_native,
                         position_currency,
                         display_currency_norm,
                         rates_to_cny,
                     )
-                    day_pnl_pct = (day_pnl_display / day_cost_display * 100) if day_cost_display > 0 else 0
+                    day_pnl_pct = (day_pnl_display / day_cost_display *
+                                   100) if day_cost_display > 0 else 0
                     acc_day_pnl += day_pnl_display
                     acc_day_cost += day_cost_display
 
                 acc_market_value += market_value_display
-
 
             current_price_display = None
             if current_price is not None:
@@ -614,7 +636,8 @@ def get_portfolio_summary(
         if include_quotes:
             acc_pnl = acc_market_value - acc_cost
             acc_pnl_pct = (acc_pnl / acc_cost * 100) if acc_cost > 0 else 0
-            acc_day_pnl_pct = (acc_day_pnl / acc_day_cost * 100) if acc_day_cost > 0 else 0
+            acc_day_pnl_pct = (acc_day_pnl / acc_day_cost *
+                               100) if acc_day_cost > 0 else 0
             acc_available_funds_display = convert_amount(
                 acc.available_funds,
                 account_base_currency,
@@ -660,8 +683,10 @@ def get_portfolio_summary(
 
     if include_quotes:
         grand_pnl = grand_total_market_value - grand_total_cost
-        grand_pnl_pct = (grand_pnl / grand_total_cost * 100) if grand_total_cost > 0 else 0
-        grand_day_pnl_pct = (grand_total_day_pnl / grand_total_day_cost * 100) if grand_total_day_cost > 0 else 0
+        grand_pnl_pct = (grand_pnl / grand_total_cost *
+                         100) if grand_total_cost > 0 else 0
+        grand_day_pnl_pct = (
+            grand_total_day_pnl / grand_total_day_cost * 100) if grand_total_day_cost > 0 else 0
         grand_total_assets = grand_total_market_value + grand_available_funds
     else:
         grand_pnl = 0

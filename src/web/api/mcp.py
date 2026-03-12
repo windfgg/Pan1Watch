@@ -866,6 +866,26 @@ def _reorder_stocks(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
 
 # ==================== 账户管理 ====================
 
+_SUPPORTED_ACCOUNT_MARKETS = {"CN", "HK", "US", "FUND"}
+_SUPPORTED_ACCOUNT_CURRENCIES = {"CNY", "HKD", "USD"}
+_MARKET_CURRENCY_MAP = {
+    "CN": "CNY",
+    "HK": "HKD",
+    "US": "USD",
+    "FUND": "CNY",
+}
+
+
+def _validate_account_market_currency(market: str, base_currency: str) -> None:
+    expected = _MARKET_CURRENCY_MAP.get(market)
+    if expected and base_currency != expected:
+        raise McpToolError(
+            error_code=ERR_INVALID_ARGS,
+            message=f"{market} 账户的 base_currency 需为 {expected}",
+            hint=f"请传入 base_currency={expected}",
+        )
+
+
 def _account_to_dict(account: Account) -> dict[str, Any]:
     return {
         "id": account.id,
@@ -892,18 +912,19 @@ def _create_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     available_funds = float(arguments.get("available_funds", 0) or 0)
     market = str(arguments.get("market", "CN") or "CN").upper()
     base_currency = str(arguments.get("base_currency", "CNY") or "CNY").upper()
-    if market not in {"CN", "HK", "US"}:
+    if market not in _SUPPORTED_ACCOUNT_MARKETS:
         raise McpToolError(
             error_code=ERR_INVALID_ARGS,
-            message="market 仅支持 CN/HK/US",
-            hint="请传入 market=CN/HK/US",
+            message="market 仅支持 CN/HK/US/FUND",
+            hint="请传入 market=CN/HK/US/FUND",
         )
-    if base_currency not in {"CNY", "HKD", "USD"}:
+    if base_currency not in _SUPPORTED_ACCOUNT_CURRENCIES:
         raise McpToolError(
             error_code=ERR_INVALID_ARGS,
             message="base_currency 仅支持 CNY/HKD/USD",
             hint="请传入 base_currency=CNY/HKD/USD",
         )
+    _validate_account_market_currency(market, base_currency)
 
     account = Account(
         name=name,
@@ -932,24 +953,28 @@ def _update_account(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         account.name = str(arguments["name"]).strip()
     if "available_funds" in arguments:
         account.available_funds = float(arguments["available_funds"])
+    next_market = str(getattr(account, "market", "CN") or "CN").upper()
+    next_base_currency = str(
+        getattr(account, "base_currency", "CNY") or "CNY").upper()
     if "market" in arguments:
-        market = str(arguments["market"] or "CN").upper()
-        if market not in {"CN", "HK", "US"}:
+        next_market = str(arguments["market"] or "CN").upper()
+        if next_market not in _SUPPORTED_ACCOUNT_MARKETS:
             raise McpToolError(
                 error_code=ERR_INVALID_ARGS,
-                message="market 仅支持 CN/HK/US",
-                hint="请传入 market=CN/HK/US",
+                message="market 仅支持 CN/HK/US/FUND",
+                hint="请传入 market=CN/HK/US/FUND",
             )
-        account.market = market
     if "base_currency" in arguments:
-        base_currency = str(arguments["base_currency"] or "CNY").upper()
-        if base_currency not in {"CNY", "HKD", "USD"}:
+        next_base_currency = str(arguments["base_currency"] or "CNY").upper()
+        if next_base_currency not in _SUPPORTED_ACCOUNT_CURRENCIES:
             raise McpToolError(
                 error_code=ERR_INVALID_ARGS,
                 message="base_currency 仅支持 CNY/HKD/USD",
                 hint="请传入 base_currency=CNY/HKD/USD",
             )
-        account.base_currency = base_currency
+    _validate_account_market_currency(next_market, next_base_currency)
+    account.market = next_market
+    account.base_currency = next_base_currency
     if "enabled" in arguments:
         account.enabled = bool(arguments["enabled"])
 
@@ -2573,7 +2598,7 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["name"],
             "properties": {
                 "name": {"type": "string", "description": "账户名称。"},
-                "market": {"type": "string", "default": "CN", "description": "账户市场：CN/HK/US。"},
+                "market": {"type": "string", "default": "CN", "description": "账户市场：CN/HK/US/FUND。"},
                 "base_currency": {"type": "string", "default": "CNY", "description": "账户币种：CNY/HKD/USD。"},
                 "available_funds": {"type": "number", "default": 0, "description": "可用资金。"},
             },
@@ -2596,7 +2621,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "account_id": {"type": "integer", "description": "账户 ID。"},
                 "name": {"type": "string", "description": "新的账户名称。"},
-                "market": {"type": "string", "description": "账户市场：CN/HK/US。"},
+                "market": {"type": "string", "description": "账户市场：CN/HK/US/FUND。"},
                 "base_currency": {"type": "string", "description": "账户币种：CNY/HKD/USD。"},
                 "available_funds": {"type": "number", "description": "新的可用资金。"},
                 "enabled": {"type": "boolean", "description": "是否启用。"},
