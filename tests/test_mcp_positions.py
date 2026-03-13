@@ -1,5 +1,6 @@
 import base64
 import unittest
+from decimal import Decimal
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -416,6 +417,43 @@ class TestMcpPositions(unittest.TestCase):
         self.assertEqual(delete_resp.status_code, 200)
         delete_data = delete_resp.json()["result"]["structuredContent"]
         self.assertTrue(delete_data["success"])
+
+    def test_positions_create_handles_decimal_in_payload(self):
+        with patch("src.web.api.mcp._position_to_dict") as mock_position_to_dict:
+            mock_position_to_dict.return_value = {
+                "id": 1,
+                "account_id": 1,
+                "stock_id": 1,
+                "cost_price": Decimal("154.7"),
+                "quantity": Decimal("21"),
+                "invested_amount": None,
+                "sort_order": 1,
+                "trading_style": "long",
+                "account_name": "main",
+                "stock_symbol": "600519",
+                "stock_name": "贵州茅台",
+            }
+            create_resp = self._rpc(
+                "tools/call",
+                {
+                    "name": "positions.create",
+                    "arguments": {
+                        "account_id": 1,
+                        "stock_id": 1,
+                        "cost_price": 154.7,
+                        "quantity": 21,
+                        "trading_style": "long",
+                    },
+                },
+                req_id=49,
+            )
+
+        self.assertEqual(create_resp.status_code, 200)
+        body = create_resp.json()
+        self.assertIn("result", body)
+        data = body["result"]["structuredContent"]
+        self.assertEqual(data["cost_price"], "154.7")
+        self.assertEqual(data["quantity"], "21")
 
 
 if __name__ == "__main__":

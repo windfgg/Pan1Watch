@@ -78,6 +78,7 @@ from src.core.agent_catalog import (
 )
 from src.core.schedule_parser import preview_schedule, count_runs_within
 from src.core.price_alert_engine import ENGINE
+from src.core.json_safe import to_jsonable
 from src.config import Settings
 
 router = APIRouter()
@@ -312,10 +313,11 @@ def _jsonrpc_error(
 
 
 def _mcp_content(payload: Any) -> dict[str, Any]:
-    text = json.dumps(payload, ensure_ascii=False, default=str)
+    safe_payload = to_jsonable(payload)
+    text = json.dumps(safe_payload, ensure_ascii=False)
     return {
         "content": [{"type": "text", "text": text}],
-        "structuredContent": payload,
+        "structuredContent": safe_payload,
     }
 
 
