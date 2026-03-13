@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Newspaper, FileText, Search, Trash2 } from 'lucide-react'
+import { Newspaper, FileText, Search, Trash2, LayoutGrid, List, ArrowUpRight } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { fetchAPI } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Input } from '@panwatch/base-ui/components/ui/input'
@@ -96,6 +97,7 @@ export default function IntelCenterPage() {
   const kind = searchParams.get('kind') || 'workflow'
   const agent = searchParams.get('agent') || 'all'
   const reportViewParam = searchParams.get('report_view')
+  const newsViewParam = searchParams.get('news_view')
 
   const ctxSymbol = (searchParams.get('symbol') || '').trim().toUpperCase()
   const ctxName = (searchParams.get('name') || '').trim()
@@ -118,6 +120,12 @@ export default function IntelCenterPage() {
     : reportViewParam === 'reader'
       ? 'reader'
       : (isMobileViewport ? 'list' : 'reader')
+
+  const newsView = newsViewParam === 'list'
+    ? 'list'
+    : newsViewParam === 'card'
+      ? 'card'
+      : (isMobileViewport ? 'list' : 'card')
 
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 767px)')
@@ -347,19 +355,40 @@ export default function IntelCenterPage() {
               </SelectContent>
             </Select>
 
+            {tab === 'news' && (
+              <div className="ml-auto inline-flex items-center gap-1 p-1 rounded-lg bg-accent/30">
+                <button
+                  onClick={() => updateParams({ news_view: 'card' })}
+                  title="卡片视图"
+                  className={`p-2 rounded-md transition-colors ${newsView === 'card' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => updateParams({ news_view: 'list' })}
+                  title="列表视图"
+                  className={`p-2 rounded-md transition-colors ${newsView === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  <List className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             {tab === 'report' && (
               <div className="ml-auto inline-flex items-center gap-1 p-1 rounded-lg bg-accent/30">
                 <button
                   onClick={() => updateParams({ report_view: 'reader' })}
-                  className={`px-3 py-1.5 rounded-md text-[12px] transition-colors ${reportView === 'reader' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                  title="目录视图"
+                  className={`p-2 rounded-md transition-colors ${reportView === 'reader' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
                 >
-                  目录
+                  <LayoutGrid className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => updateParams({ report_view: 'list' })}
-                  className={`px-3 py-1.5 rounded-md text-[12px] transition-colors ${reportView === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                  title="列表视图"
+                  className={`p-2 rounded-md transition-colors ${reportView === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
                 >
-                  列表
+                  <List className="w-3.5 h-3.5" />
                 </button>
               </div>
             )}
@@ -375,34 +404,88 @@ export default function IntelCenterPage() {
         <div className="card p-3 md:p-4 space-y-2">
           {(newsData?.items || []).length === 0 ? (
             <div className="py-12 text-center text-[13px] text-muted-foreground">暂无资讯</div>
-          ) : (
-            (newsData?.items || []).map((item) => (
-              <div key={`${item.source}-${item.external_id}`} className="rounded-lg border border-border/40 bg-accent/15 hover:bg-accent/25 transition-colors p-3">
-                <div className="flex items-center gap-2 text-[11px] text-muted-foreground mb-1.5">
-                  <Badge variant="secondary" className="text-[10px]">{item.source_label}</Badge>
-                  {item.importance >= 2 && <Badge className="text-[10px]">重要</Badge>}
-                  <span>{item.publish_time}</span>
-                </div>
-                <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-[14px] font-medium text-foreground hover:text-primary transition-colors">
-                  {item.title}
-                </a>
-                {item.content ? <p className="text-[12px] text-muted-foreground mt-1 line-clamp-2">{item.content}</p> : null}
-                {item.symbols?.length ? (
-                  <div className="mt-2 flex items-center gap-1 flex-wrap">
-                    {item.symbols.slice(0, 6).map((sym) => {
-                      const code = String(sym || '').toUpperCase()
-                      const name = stockNameMap[code] || code
-                      const label = name && name !== code ? `${name} (${code})` : code
-                      return (
-                        <Badge key={`${item.external_id}-${code}`} variant="outline" className="text-[10px]">
-                          {label}
-                        </Badge>
-                      )
-                    })}
+          ) : newsView === 'card' ? (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              {(newsData?.items || []).map((item) => (
+                <div key={`${item.source}-${item.external_id}`} className="rounded-lg border border-border/40 bg-accent/15 hover:bg-accent/25 transition-colors p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground mb-1.5 flex-wrap">
+                        <Badge variant="secondary" className="text-[10px]">{item.source_label}</Badge>
+                        {item.importance >= 2 && <Badge className="text-[10px]">重要</Badge>}
+                        <span>{item.publish_time}</span>
+                      </div>
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-[14px] font-medium text-foreground hover:text-primary transition-colors line-clamp-2">
+                        {item.title}
+                      </a>
+                    </div>
+                    {item.url ? (
+                      <Button asChild variant="default" size="sm" className="shrink-0 h-8 px-3 text-[12px]">
+                        <a href={item.url} target="_blank" rel="noopener noreferrer">
+                          <ArrowUpRight className="w-3.5 h-3.5" />查看原文
+                        </a>
+                      </Button>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
-            ))
+                  {item.content ? <p className="text-[12px] text-muted-foreground mt-2 leading-6 line-clamp-3">{item.content}</p> : null}
+                  {item.symbols?.length ? (
+                    <div className="mt-3 flex items-center gap-1 flex-wrap">
+                      {item.symbols.slice(0, 6).map((sym) => {
+                        const code = String(sym || '').toUpperCase()
+                        const name = stockNameMap[code] || code
+                        const label = name && name !== code ? `${name} (${code})` : code
+                        return (
+                          <Badge key={`${item.external_id}-${code}`} variant="outline" className="text-[10px]">
+                            {label}
+                          </Badge>
+                        )
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {(newsData?.items || []).map((item) => (
+                <div key={`${item.source}-${item.external_id}`} className="rounded-lg border border-border/40 bg-accent/15 hover:bg-accent/25 transition-colors p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground mb-1.5 flex-wrap">
+                        <Badge variant="secondary" className="text-[10px]">{item.source_label}</Badge>
+                        {item.importance >= 2 && <Badge className="text-[10px]">重要</Badge>}
+                        <span>{item.publish_time}</span>
+                      </div>
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-[14px] font-medium text-foreground hover:text-primary transition-colors">
+                        {item.title}
+                      </a>
+                      {item.content ? <p className="text-[12px] text-muted-foreground mt-1 line-clamp-2">{item.content}</p> : null}
+                      {item.symbols?.length ? (
+                        <div className="mt-2 flex items-center gap-1 flex-wrap">
+                          {item.symbols.slice(0, 6).map((sym) => {
+                            const code = String(sym || '').toUpperCase()
+                            const name = stockNameMap[code] || code
+                            const label = name && name !== code ? `${name} (${code})` : code
+                            return (
+                              <Badge key={`${item.external_id}-${code}`} variant="outline" className="text-[10px]">
+                                {label}
+                              </Badge>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                    {item.url ? (
+                      <Button asChild variant="ghost" size="sm" className="shrink-0 h-8 px-2 text-[12px] text-primary hover:text-primary">
+                        <a href={item.url} target="_blank" rel="noopener noreferrer">
+                          <ArrowUpRight className="w-3.5 h-3.5" />原文
+                        </a>
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       ) : (
@@ -460,7 +543,7 @@ export default function IntelCenterPage() {
                     </Button>
                   </div>
                   <div className="mt-3 p-3 md:p-4 rounded-lg bg-accent/20 prose prose-sm dark:prose-invert max-w-none max-h-[52vh] overflow-y-auto">
-                    <ReactMarkdown>{selectedReport.content || ''}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedReport.content || ''}</ReactMarkdown>
                   </div>
                 </>
               ) : (
@@ -545,7 +628,7 @@ export default function IntelCenterPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg bg-accent/20 p-3 md:p-4 prose prose-sm dark:prose-invert max-w-none">
-            <ReactMarkdown>{detailReport?.content || ''}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{detailReport?.content || ''}</ReactMarkdown>
           </div>
           {detailReport && (
             <div className="flex justify-end">

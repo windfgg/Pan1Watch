@@ -84,7 +84,7 @@ interface SuggestionBadgeProps {
   showTechnicalCompanion?: boolean // 是否展示技术指标对照徽章
 }
 
-// 格式化建议时间（自动转换为本地时区，只显示时:分）
+// 格式化建议时间（自动转换为本地时区，显示到秒）
 function formatSuggestionTime(isoTime?: string): string {
   if (!isoTime) return ''
   try {
@@ -95,6 +95,7 @@ function formatSuggestionTime(isoTime?: string): string {
     return date.toLocaleTimeString('zh-CN', {
       hour: '2-digit',
       minute: '2-digit',
+      second: '2-digit',
       hour12: false
     })
   } catch {
@@ -113,6 +114,7 @@ function formatSuggestionDateTime(isoTime?: string): string {
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
+      second: '2-digit',
       hour12: false
     })
   } catch {

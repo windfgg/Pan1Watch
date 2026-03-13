@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Copy, Download, ExternalLink, RefreshCw, Share2 } from 'lucide-react'
 import { insightApi, stocksApi } from '@panwatch/api'
 import { getMarketBadge } from '@panwatch/biz-ui'
@@ -19,6 +20,7 @@ import { TechnicalBadge } from '@panwatch/biz-ui/components/technical-badge'
 interface QuoteResponse {
   symbol: string
   market: string
+  exchange?: string | null
   name: string | null
   current_price: number | null
   change_pct: number | null
@@ -158,6 +160,28 @@ function formatMarketCap(value: number | null | undefined, market?: string): str
   return `${n.toFixed(0)}元`
 }
 
+function getMarketText(market?: string, symbol?: string, exchange?: string | null): string {
+  const value = String(market || '').toUpperCase()
+  const code = String(symbol || '').trim().toUpperCase()
+  const ex = String(exchange || '').trim().toUpperCase()
+  if (value === 'US') {
+    if (ex.includes('NASDAQ')) return '纳斯达克'
+    if (ex.includes('NYSE')) return '纽交所'
+    if (ex.includes('AMEX')) return '美交所'
+    return '美股'
+  }
+  if (value === 'CN') {
+    if (/^(920|83|87|88)/.test(code)) return '北交所'
+    if (/^(300|301)/.test(code)) return '创业板'
+    if (/^(5|6|900)/.test(code)) return '上交所'
+    if (/^(0|1|2|3)/.test(code)) return '深交所'
+    return 'A股'
+  }
+  if (value === 'HK') return '港交所'
+  if (value === 'FUND') return '基金'
+  return value || '--'
+}
+
 function formatTime(isoTime?: string): string {
   if (!isoTime) return ''
   const d = new Date(isoTime)
@@ -169,6 +193,45 @@ function formatTime(isoTime?: string): string {
     minute: '2-digit',
     hour12: false,
   })
+}
+
+function formatClockTime(value?: string | number | Date | null): string {
+  if (value == null || value === '') return '--:--:--'
+  const d = value instanceof Date ? value : new Date(value)
+  if (isNaN(d.getTime())) return '--:--:--'
+  return d.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
+function isSameQuoteSnapshot(a: QuoteResponse | null | undefined, b: QuoteResponse | null | undefined): boolean {
+  if (!a && !b) return true
+  if (!a || !b) return false
+
+  const norm = (v: unknown): number | null => {
+    if (v == null || v === '') return null
+    const n = Number(v)
+    if (!Number.isFinite(n)) return null
+    return Math.round(n * 10000) / 10000
+  }
+
+  const eq = (x: unknown, y: unknown, eps = 1e-4): boolean => {
+    const nx = norm(x)
+    const ny = norm(y)
+    if (nx == null && ny == null) return true
+    if (nx == null || ny == null) return false
+    return Math.abs(nx - ny) <= eps
+  }
+
+  return (
+    eq(a.current_price, b.current_price)
+    && eq(a.change_pct, b.change_pct)
+    && eq(a.change_amount, b.change_amount)
+    && eq(a.prev_close, b.prev_close)
+  )
 }
 
 function parseToMs(input?: string): number | null {
@@ -351,10 +414,13 @@ export default function StockInsightModal(props: {
     20
   )
   const [autoRefreshProgress, setAutoRefreshProgress] = useState(0)
+  const [autoRefreshChanged, setAutoRefreshChanged] = useState(false)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [klineRefreshTrigger, setKlineRefreshTrigger] = useState(0)
   const [overviewHighlightKey, setOverviewHighlightKey] = useState(0)
   const [overviewHighlightUp, setOverviewHighlightUp] = useState<boolean | null>(null)
   const prevQuoteRef = useRef<{ current_price: number | null; change_pct: number | null } | null>(null)
+  const quoteStateRef = useRef<QuoteResponse | null>(null)
   const [quote, setQuote] = useState<QuoteResponse | null>(null)
   const [klineSummary, setKlineSummary] = useState<KlineSummary | null>(null)
   const [miniKlines, setMiniKlines] = useState<MiniKlineResponse['klines']>([])
@@ -364,13 +430,17 @@ export default function StockInsightModal(props: {
   const [news, setNews] = useState<NewsItem[]>([])
   const [announcements, setAnnouncements] = useState<NewsItem[]>([])
   const [reports, setReports] = useState<HistoryRecord[]>([])
-  const [reportTab, setReportTab] = useState<'premarket_outlook' | 'daily_report' | 'news_digest'>('premarket_outlook')
+  const [reportTab, setReportTab] = useState<'premarket_outlook' | 'daily_report'>('premarket_outlook')
   const [klineInterval] = useState<'1d' | '1w' | '1m'>('1d')
   const [alerting, setAlerting] = useState(false)
   const [watchingStock, setWatchingStock] = useState<StockItem | null>(null)
   const [watchToggleLoading, setWatchToggleLoading] = useState(false)
   const [autoSuggesting, setAutoSuggesting] = useState(false)
   const [imageExporting, setImageExporting] = useState(false)
+  const [sharePreviewOpen, setSharePreviewOpen] = useState(false)
+  const [sharePreviewUrl, setSharePreviewUrl] = useState('')
+  const [includeHoldingPnlRate, setIncludeHoldingPnlRate] = useState(true)
+  const [includeHoldingPnlAmount, setIncludeHoldingPnlAmount] = useState(true)
   const [holdingAgg, setHoldingAgg] = useState<{
     quantity: number
     cost: number
@@ -387,12 +457,16 @@ export default function StockInsightModal(props: {
   const loadQuote = useCallback(async () => {
     if (!symbol) return
     const data = await insightApi.quote<QuoteResponse>(symbol, market)
+    const next = data || null
+    setAutoRefreshChanged(!isSameQuoteSnapshot(quoteStateRef.current, next))
+    setLastUpdatedAt(Date.now())
     setQuote(data || null)
   }, [symbol, market])
 
   const loadKline = useCallback(async () => {
     if (!symbol) return
     const data = await insightApi.klineSummary<KlineSummaryResponse>(symbol, market)
+    setLastUpdatedAt(Date.now())
     setKlineSummary(data?.summary || null)
   }, [symbol, market])
 
@@ -406,6 +480,7 @@ export default function StockInsightModal(props: {
         days: 36,
         interval: '1d',
       })
+      setLastUpdatedAt(Date.now())
       setMiniKlines((data?.klines || []).slice(-30))
     } catch {
       setMiniKlines([])
@@ -437,6 +512,7 @@ export default function StockInsightModal(props: {
       raw: item.raw || '',
       meta: item.meta,
     })) as SuggestionInfo[]
+    setLastUpdatedAt(Date.now())
     setSuggestions(list)
   }, [symbol, market, includeExpiredSuggestions])
 
@@ -515,6 +591,7 @@ export default function StockInsightModal(props: {
             .filter((n) => !!n.title)
         }
       }
+      setLastUpdatedAt(Date.now())
       setNews(data || [])
     } catch {
       setNews([])
@@ -559,6 +636,7 @@ export default function StockInsightModal(props: {
           return (n.symbols || []).map(x => String(x).toUpperCase()).includes(upperSymbol)
         })
       }
+      setLastUpdatedAt(Date.now())
       setAnnouncements(data || [])
     } catch {
       setAnnouncements([])
@@ -584,6 +662,7 @@ export default function StockInsightModal(props: {
           pnl += Number(p.pnl || 0)
         }
       }
+      setLastUpdatedAt(Date.now())
       if (quantity > 0) setHoldingAgg({ quantity, cost, unitCost: cost / quantity, marketValue, pnl })
       else setHoldingAgg(null)
     } catch {
@@ -597,7 +676,7 @@ export default function StockInsightModal(props: {
   const loadReports = useCallback(async () => {
     if (!symbol) return
     try {
-      const agents = ['premarket_outlook', 'daily_report', 'news_digest']
+      const agents = ['premarket_outlook', 'daily_report']
       const bySymbolResults = await Promise.all(
         agents.map(agent =>
           insightApi.history<HistoryRecord[]>({
@@ -644,11 +723,16 @@ export default function StockInsightModal(props: {
         const bm = parseToMs(b.updated_at || b.created_at || b.analysis_date) || 0
         return bm - am
       })
+      setLastUpdatedAt(Date.now())
       setReports(merged)
     } catch {
       setReports([])
     }
   }, [symbol, resolvedName])
+
+  useEffect(() => {
+    quoteStateRef.current = quote
+  }, [quote])
 
   const loadCore = useCallback(async () => {
     if (!symbol) return
@@ -823,8 +907,11 @@ export default function StockInsightModal(props: {
       const prevPrice = prev.current_price ?? 0
       const currPrice = current.current_price ?? 0
       const delta = currPrice - prevPrice
-      setOverviewHighlightUp(delta > 0 ? true : delta < 0 ? false : null)
-      setOverviewHighlightKey(k => k + 1)
+      const pctChanged = (prev.change_pct ?? null) !== (current.change_pct ?? null)
+      if (delta !== 0 || pctChanged) {
+        setOverviewHighlightUp(delta > 0 ? true : delta < 0 ? false : null)
+        setOverviewHighlightKey(k => k + 1)
+      }
     }
     prevQuoteRef.current = current
   }, [quote])
@@ -855,12 +942,22 @@ export default function StockInsightModal(props: {
     const out: Record<string, HistoryRecord | null> = {
       premarket_outlook: null,
       daily_report: null,
-      news_digest: null,
     }
     for (const r of reports) {
       if (!out[r.agent_name]) out[r.agent_name] = r
     }
     return out
+  }, [reports])
+  const reportCounts = useMemo(() => {
+    const counts = {
+      premarket_outlook: 0,
+      daily_report: 0,
+    }
+    for (const item of reports) {
+      if (item.agent_name === 'premarket_outlook') counts.premarket_outlook += 1
+      if (item.agent_name === 'daily_report') counts.daily_report += 1
+    }
+    return counts
   }, [reports])
   const activeReport = reportMap[reportTab]
   const latestReport = reports[0] || null
@@ -943,7 +1040,7 @@ export default function StockInsightModal(props: {
   const shareText = useMemo(() => {
     const { marketLabel, price, chg, action, signal, reason, risks, trigger, invalidation, technicalBrief, levelsBrief, source, ts } = shareCardPayload
     const lines = [
-      `【PanWatch 洞察】${resolvedName}（${symbol} · ${marketLabel}）`,
+      `Pan1Watch 洞察】${resolvedName}（${symbol} · ${marketLabel}）`,
       `时间：${ts}`,
       `现价：${price}（${chg}）`,
       `建议：${action}`,
@@ -959,7 +1056,18 @@ export default function StockInsightModal(props: {
     return lines.join('\n')
   }, [shareCardPayload, resolvedName, symbol])
 
-  const handleExportShareImage = useCallback(async () => {
+  const holdingPnlRate = useMemo(() => {
+    if (!holdingAgg || holdingAgg.cost <= 0) return null
+    return (holdingAgg.pnl / holdingAgg.cost) * 100
+  }, [holdingAgg])
+
+  const shareImageWidth = 1200
+  const shareImageHeight = 1680
+
+  const buildShareSvg = useCallback((opts: {
+    includePnlRate: boolean
+    includePnlAmount: boolean
+  }) => {
     const esc = (s: string) => String(s || '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -971,50 +1079,206 @@ export default function StockInsightModal(props: {
       return x.length > n ? `${x.slice(0, n - 1)}…` : x
     }
 
-    setImageExporting(true)
-    try {
-      const { marketLabel, price, chg, action, signal, reason, risks, technicalBrief, levelsBrief, source, ts } = shareCardPayload
-      const up = (quote?.change_pct || 0) >= 0
-      const changeColor = up ? '#ef4444' : '#10b981'
-      const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+    const splitLines = (s: string, maxUnits: number, maxLines: number) => {
+      const text = String(s || '').replace(/\s+/g, ' ').trim()
+      if (!text) return [] as string[]
+
+      const unit = (ch: string) => {
+        if (/\s/.test(ch)) return 0.3
+        if (/[a-zA-Z0-9.%+\-]/.test(ch)) return 0.56
+        if (/[，。；：、！？,.!?:;]/.test(ch)) return 0.45
+        return 1
+      }
+
+      const lines: string[] = []
+      let i = 0
+      while (i < text.length && lines.length < maxLines) {
+        let width = 0
+        let j = i
+        let lastBreak = -1
+        while (j < text.length) {
+          const ch = text[j]
+          if (ch === '\n') break
+          width += unit(ch)
+          if (/[，。；：、！？,.!?:;\s]/.test(ch)) lastBreak = j
+          if (width > maxUnits) {
+            if (lastBreak >= i) j = lastBreak + 1
+            break
+          }
+          j += 1
+        }
+
+        if (j <= i) j = Math.min(i + 1, text.length)
+        let line = text.slice(i, j).trim()
+        if (!line && i < text.length) {
+          line = text.slice(i, Math.min(i + 1, text.length))
+          j = i + 1
+        }
+        lines.push(line)
+        i = j
+        while (i < text.length && /\s/.test(text[i])) i += 1
+      }
+
+      if (i < text.length && lines.length > 0) {
+        const last = lines.length - 1
+        lines[last] = `${lines[last].slice(0, Math.max(1, lines[last].length - 1))}…`
+      }
+      return lines
+    }
+
+    const actionRaw = String(latestShareSuggestion?.action || '').toLowerCase()
+    const actionLabel = latestShareSuggestion?.action_label || latestShareSuggestion?.action || '观望'
+    const actionColor = actionRaw === 'avoid' || actionRaw === 'sell'
+      ? '#8f6b2f'
+      : actionRaw === 'reduce'
+        ? '#9b7e42'
+        : actionRaw === 'buy' || actionRaw === 'add'
+          ? '#2f855a'
+          : '#6b7280'
+    const actionBg = actionRaw === 'avoid' || actionRaw === 'sell'
+      ? '#f6ead1'
+      : actionRaw === 'reduce'
+        ? '#f6edd9'
+        : actionRaw === 'buy' || actionRaw === 'add'
+          ? '#e7f6ea'
+          : '#eceff3'
+
+    const topLeftIsHolding = opts.includePnlRate && holdingPnlRate != null
+    const topRightIsHolding = opts.includePnlAmount && !!holdingAgg
+    const bothHoldingTogglesOff = !opts.includePnlRate && !opts.includePnlAmount
+    const anyHoldingToggleOn = opts.includePnlRate || opts.includePnlAmount
+    const showTechCard = opts.includePnlRate || opts.includePnlAmount
+    const changePct = quote?.change_pct ?? 0
+    const gainRate = topLeftIsHolding ? holdingPnlRate : changePct
+    const gainAmount = topRightIsHolding ? (holdingAgg?.pnl ?? null) : (bothHoldingTogglesOff ? quote?.current_price ?? null : changePct)
+    const gainRateColor = gainRate >= 0 ? '#2f855a' : '#b45309'
+    const gainAmountColor = bothHoldingTogglesOff
+      ? '#2f2a23'
+      : (gainAmount != null ? (gainAmount >= 0 ? '#2f855a' : '#b45309') : '#6b7280')
+    const leftTitle = topLeftIsHolding ? '当前收益率:' : '当前涨跌:'
+    const rightTitle = topRightIsHolding ? '累计收益金额:' : (bothHoldingTogglesOff ? '当前价格:' : '当前涨跌:')
+    const rightValue = gainAmount == null
+      ? '--'
+      : bothHoldingTogglesOff
+        ? gainAmount.toFixed(2)
+        : `${gainAmount >= 0 ? '+' : ''}${gainAmount.toFixed(2)}${topRightIsHolding ? '' : '%'}`
+
+    const signalLines = splitLines(shareCardPayload.signal || '暂无明显信号，建议等待更清晰结构。', 10.4, 4)
+    const reasonLines = splitLines(shareCardPayload.reason || '暂无明确理由，建议结合市场环境复核。', 10.4, 4)
+    const riskLines = splitLines(shareCardPayload.risks || '市场波动风险', 10.4, 4)
+    const sourceTime = latestShareSuggestion?.created_at
+      ? formatClockTime(latestShareSuggestion.created_at)
+      : formatClockTime(Date.now())
+    const showBottomDetails = true
+    const showHolding = false
+    const holdingRefLines = showBottomDetails
+      ? splitLines(`技术摘要: ${shareCardPayload.technicalBrief} / ${shareCardPayload.levelsBrief}`, 44, 2)
+      : []
+    const techLeftTitle = anyHoldingToggleOn ? '当前涨跌' : '技术评分'
+    const techLeftValue = anyHoldingToggleOn ? changePct : Number(technicalScored?.score ?? 0)
+    const techLeftColor = techLeftValue >= 0 ? '#2f855a' : '#b45309'
+    const holdingsBaseY = showTechCard ? 1548 : 1454
+    const metricsY = holdingsBaseY + holdingRefLines.length * 32 + 20
+    const lastRefY = holdingRefLines.length > 0 ? (holdingsBaseY + (holdingRefLines.length - 1) * 32) : holdingsBaseY
+    const desiredSourceY = showHolding ? (metricsY + 34) : (lastRefY + 30)
+    const sourceY = Math.min(showTechCard ? 1578 : 1546, desiredSourceY)
+
+    const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${shareImageWidth}" height="${shareImageHeight}" viewBox="0 0 ${shareImageWidth} ${shareImageHeight}">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0b1220"/>
-      <stop offset="100%" stop-color="#111827"/>
+      <stop offset="0%" stop-color="#f3efe7"/>
+      <stop offset="100%" stop-color="#e9e3d9"/>
     </linearGradient>
+    <linearGradient id="topPanel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7faf7"/>
+      <stop offset="100%" stop-color="#e9f6ed"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.94"/>
+      <stop offset="100%" stop-color="#f7f4ee" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#5e5544" flood-opacity="0.16"/>
+    </filter>
+    <clipPath id="signalColClip">
+      <rect x="114" y="928" width="294" height="382" rx="8"/>
+    </clipPath>
+    <clipPath id="reasonColClip">
+      <rect x="448" y="928" width="294" height="382" rx="8"/>
+    </clipPath>
+    <clipPath id="riskColClip">
+      <rect x="782" y="928" width="294" height="382" rx="8"/>
+    </clipPath>
   </defs>
-  <rect x="0" y="0" width="1200" height="630" fill="url(#bg)"/>
-  <rect x="40" y="30" width="1120" height="570" rx="22" fill="#0f172a" stroke="#1f2937"/>
-  <text x="76" y="104" fill="#93c5fd" font-size="26" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">PanWatch 洞察</text>
-  <text x="76" y="150" fill="#f8fafc" font-size="42" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(`${resolvedName}（${symbol} · ${marketLabel}）`, 28))}</text>
-  <text x="76" y="198" fill="#94a3b8" font-size="22" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(ts)}</text>
+  <rect x="0" y="0" width="1200" height="1680" fill="url(#bg)"/>
+  <rect x="64" y="58" width="1072" height="1560" rx="38" fill="url(#glass)" stroke="#d6ccbd" filter="url(#softShadow)"/>
 
-  <text x="76" y="284" fill="#94a3b8" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">现价</text>
-  <text x="180" y="284" fill="#f8fafc" font-size="52" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(price)}</text>
-  <text x="380" y="284" fill="${changeColor}" font-size="36" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(chg)}</text>
+  <text x="94" y="116" fill="#6e6252" font-size="36" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(shareCardPayload.ts)}</text>
+  <text x="1106" y="116" fill="#5f5649" font-size="56" text-anchor="end" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">Pan1Watch</text>
 
-  <text x="76" y="352" fill="#94a3b8" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">建议</text>
-  <text x="180" y="352" fill="#22d3ee" font-size="34" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(action, 20))}</text>
+  <rect x="94" y="162" width="1012" height="264" rx="30" fill="url(#topPanel)" stroke="#cce4d0"/>
+  <line x1="600" y1="198" x2="600" y2="390" stroke="#d7e7db"/>
+  <text x="142" y="244" fill="#23201b" font-size="52" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${leftTitle}</text>
+  <text x="642" y="244" fill="#23201b" font-size="52" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${rightTitle}</text>
+  <text x="142" y="356" fill="${gainRateColor}" font-size="84" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${gainRate >= 0 ? '+' : ''}${gainRate.toFixed(2)}%</text>
+  <text x="642" y="356" fill="${gainAmountColor}" font-size="74" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${rightValue}</text>
 
-  <text x="76" y="412" fill="#94a3b8" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">信号</text>
-  <text x="180" y="412" fill="#e2e8f0" font-size="26" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(signal, 46))}</text>
+  <rect x="94" y="446" width="676" height="274" rx="30" fill="#fffdfa" stroke="#d9d0c2"/>
+  <text x="130" y="520" fill="#1f1c17" font-size="62" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(resolvedName, 12))}</text>
+  <text x="130" y="588" fill="#2a251f" font-size="42" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">(${esc(symbol)} · ${esc(shareCardPayload.marketLabel)})</text>
+  <text x="130" y="660" fill="#2a251f" font-size="54" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">现价 ${quote?.current_price != null ? quote.current_price.toFixed(2) : '--'} <tspan fill="${(quote?.change_pct || 0) >= 0 ? '#2f855a' : '#b45309'}">(${(quote?.change_pct || 0) >= 0 ? '+' : ''}${quote?.change_pct != null ? quote.change_pct.toFixed(2) : '--'}%)</tspan></text>
 
-  <text x="76" y="466" fill="#94a3b8" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">理由</text>
-  <text x="180" y="466" fill="#cbd5e1" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(reason, 52))}</text>
+  <rect x="790" y="446" width="316" height="274" rx="30" fill="${actionBg}" stroke="#d8ccb3"/>
+  <text x="832" y="530" fill="#5a4c37" font-size="54" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">建议</text>
+  <text x="850" y="640" fill="${actionColor}" font-size="86" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(actionLabel, 2))}</text>
+  <text x="948" y="700" text-anchor="middle" fill="#6f6658" font-size="24" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(shareCardPayload.source)} · ${esc(sourceTime)}</text>
 
-  <text x="76" y="520" fill="#94a3b8" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">风险</text>
-  <text x="180" y="520" fill="#cbd5e1" font-size="24" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(risks, 52))}</text>
+  <rect x="94" y="800" width="1012" height="560" rx="30" fill="#fffdf9" stroke="#d9d0c2"/>
+  <line x1="430" y1="832" x2="430" y2="1324" stroke="#d8d0c4"/>
+  <line x1="764" y1="832" x2="764" y2="1324" stroke="#d8d0c4"/>
 
-  <text x="76" y="560" fill="#94a3b8" font-size="22" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">技术</text>
-  <text x="180" y="560" fill="#cbd5e1" font-size="21" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(technicalBrief, 58))}</text>
-  <text x="76" y="590" fill="#94a3b8" font-size="22" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">关键位</text>
-  <text x="180" y="590" fill="#cbd5e1" font-size="21" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(levelsBrief, 58))}</text>
-  <text x="76" y="618" fill="#64748b" font-size="18" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">来源：${esc(source)} · 仅供参考，不构成投资建议</text>
+  <text x="130" y="898" fill="#221f1a" font-size="64" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">信号</text>
+  <text x="464" y="898" fill="#221f1a" font-size="64" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">理由</text>
+  <text x="798" y="898" fill="#221f1a" font-size="64" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">风险</text>
+
+  <g clip-path="url(#signalColClip)">
+    ${(signalLines.length ? signalLines : ['暂无']).map((line, idx) => `<text x="130" y="${986 + idx * 60}" fill="#2d2923" font-size="28" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('')}
+  </g>
+  <g clip-path="url(#reasonColClip)">
+    ${(reasonLines.length ? reasonLines : ['暂无']).map((line, idx) => `<text x="464" y="${986 + idx * 60}" fill="#2d2923" font-size="28" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('')}
+  </g>
+  <g clip-path="url(#riskColClip)">
+    ${(riskLines.length ? riskLines : ['暂无']).map((line, idx) => `<text x="798" y="${986 + idx * 60}" fill="#2d2923" font-size="28" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('')}
+  </g>
+
+  ${showTechCard ? `<rect x="94" y="1392" width="1012" height="116" rx="20" fill="#f3f7f4" stroke="#cfe0d4"/>
+  <line x1="600" y1="1410" x2="600" y2="1488" stroke="#d7e5da"/>
+  <text x="130" y="1436" fill="#5f5649" font-size="20" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${techLeftTitle}</text>
+  <text x="130" y="1478" fill="${techLeftColor}" font-size="32" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${techLeftValue >= 0 ? '+' : ''}${techLeftValue.toFixed(2)}${anyHoldingToggleOn ? '%' : ''}</text>
+  <text x="640" y="1436" fill="#5f5649" font-size="20" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">当前价格</text>
+  <text x="640" y="1478" fill="#2f2a23" font-size="32" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${quote?.current_price != null ? quote.current_price.toFixed(2) : '--'}</text>` : ''}
+  ${showBottomDetails ? (holdingRefLines.length ? holdingRefLines : ['技术摘要: --']).map((line, idx) => `<text x="110" y="${holdingsBaseY + idx * 32}" fill="#7b7163" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('') : ''}
+
+  ${showHolding ? `<text x="110" y="${metricsY}" fill="#7b7163" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">持仓指标已启用</text>` : ''}
+  ${showBottomDetails ? `<text x="110" y="${sourceY}" fill="#918573" font-size="18" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">数据来源：行情接口与 Pan1Watch · 仅供参考，不构成投资建议</text>` : ''}
 </svg>`
 
-      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
+    return svg
+  }, [holdingAgg, holdingPnlRate, latestShareSuggestion?.action, latestShareSuggestion?.action_label, latestShareSuggestion?.created_at, quote?.change_pct, quote?.current_price, resolvedName, shareCardPayload.levelsBrief, shareCardPayload.marketLabel, shareCardPayload.reason, shareCardPayload.risks, shareCardPayload.signal, shareCardPayload.source, shareCardPayload.technicalBrief, symbol, technicalScored?.score, shareImageHeight, shareImageWidth])
+
+  const renderSharePreview = useCallback(async (opts?: {
+    includePnlRate: boolean
+    includePnlAmount: boolean
+  }) => {
+    const svg = buildShareSvg(opts || {
+      includePnlRate: includeHoldingPnlRate,
+      includePnlAmount: includeHoldingPnlAmount,
+    })
+
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    try {
       const img = await new Promise<HTMLImageElement>((resolve, reject) => {
         const el = new Image()
         el.onload = () => resolve(el)
@@ -1022,24 +1286,58 @@ export default function StockInsightModal(props: {
         el.src = url
       })
       const canvas = document.createElement('canvas')
-      canvas.width = 1200
-      canvas.height = 630
+      canvas.width = shareImageWidth
+      canvas.height = shareImageHeight
       const ctx = canvas.getContext('2d')
       if (!ctx) throw new Error('无法创建画布')
       ctx.drawImage(img, 0, 0)
+      return canvas.toDataURL('image/png')
+    } finally {
       URL.revokeObjectURL(url)
-      const png = canvas.toDataURL('image/png')
-      const a = document.createElement('a')
-      a.href = png
-      a.download = `panwatch-${symbol}-${Date.now()}.png`
-      a.click()
-      toast('分享图片已生成并下载', 'success')
+    }
+  }, [buildShareSvg, includeHoldingPnlAmount, includeHoldingPnlRate, shareImageHeight, shareImageWidth])
+
+  const handleOpenSharePreview = useCallback(async () => {
+    setImageExporting(true)
+    try {
+      const png = await renderSharePreview()
+      setSharePreviewUrl(png)
+      setSharePreviewOpen(true)
     } catch {
       toast('图片生成失败，请稍后重试', 'error')
     } finally {
       setImageExporting(false)
     }
-  }, [quote?.change_pct, resolvedName, shareCardPayload, symbol, toast])
+  }, [renderSharePreview, toast])
+
+  const handleSaveShareImage = useCallback(() => {
+    if (!sharePreviewUrl) return
+    const a = document.createElement('a')
+    a.href = sharePreviewUrl
+    a.download = `Pan1Watch-${symbol}-${Date.now()}.png`
+    a.click()
+    toast('分享图片已保存', 'success')
+  }, [sharePreviewUrl, symbol, toast])
+
+  useEffect(() => {
+    if (!sharePreviewOpen) return
+    let cancelled = false
+    setImageExporting(true)
+    renderSharePreview({
+      includePnlRate: includeHoldingPnlRate,
+      includePnlAmount: includeHoldingPnlAmount,
+    })
+      .then((png) => {
+        if (!cancelled) setSharePreviewUrl(png)
+      })
+      .catch(() => {
+        if (!cancelled) toast('预览图更新失败', 'error')
+      })
+      .finally(() => {
+        if (!cancelled) setImageExporting(false)
+      })
+    return () => { cancelled = true }
+  }, [includeHoldingPnlAmount, includeHoldingPnlRate, renderSharePreview, sharePreviewOpen, toast])
 
   const copyTextWithFallback = useCallback(async (text: string): Promise<boolean> => {
     if (!text) return false
@@ -1253,11 +1551,12 @@ export default function StockInsightModal(props: {
                   <span className={`text-[10px] px-2 py-0.5 rounded ${badge.style}`}>{badge.label}</span>
                   <span className="break-all">{resolvedName}</span>
                   <span className="font-mono text-[12px] text-muted-foreground">({symbol})</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{getMarketText(market, symbol, quote?.exchange)}</span>
                 </DialogTitle>
               
               </div>
               <div className="hidden md:flex items-center gap-2">
-                <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={() => handleExportShareImage()} disabled={imageExporting}>
+                <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={() => handleOpenSharePreview()} disabled={imageExporting}>
                   <Download className={`w-3.5 h-3.5 ${imageExporting ? 'animate-pulse' : ''}`} />
                   <span>{imageExporting ? '生成中' : '图片'}</span>
                 </Button>
@@ -1280,13 +1579,13 @@ export default function StockInsightModal(props: {
                   {watchToggleLoading ? '处理中...' : (watchingStock ? (hasHolding ? '持仓中' : '取消关注') : '快速关注')}
                 </Button>
                 <StockPriceAlertPanel mode="inline" symbol={symbol} market={market} stockName={resolvedName} />
-                <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={handleSetAlert} disabled={alerting}>
+                <Button variant="secondary" size="sm" className="h-8 px-2.5 hidden" onClick={handleSetAlert} disabled={alerting}>
                   {alerting ? '设置中...' : '一键设提醒'}
                 </Button>
               </div>
             </div>
             <div className="flex md:hidden items-center gap-2 mt-2 overflow-x-auto scrollbar-none pb-1 -mb-1">
-              <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={() => handleExportShareImage()} disabled={imageExporting}>
+              <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={() => handleOpenSharePreview()} disabled={imageExporting}>
                 <Download className={`w-3.5 h-3.5 ${imageExporting ? 'animate-pulse' : ''}`} />
               </Button>
               <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={() => handleShareInsight()}>
@@ -1305,7 +1604,7 @@ export default function StockInsightModal(props: {
                 {watchToggleLoading ? '处理中...' : (watchingStock ? (hasHolding ? '持仓中' : '取消关注') : '快速关注')}
               </Button>
               <StockPriceAlertPanel mode="inline" symbol={symbol} market={market} stockName={resolvedName} />
-              <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={handleSetAlert} disabled={alerting}>
+              <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0 hidden" onClick={handleSetAlert} disabled={alerting}>
                 {alerting ? '设置中...' : '一键设提醒'}
               </Button>
             </div>
@@ -1340,7 +1639,7 @@ export default function StockInsightModal(props: {
                 className="flex md:hidden w-8 h-8 rounded-xl items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all disabled:opacity-50 relative"
                 title="刷新"
               >
-                {autoRefreshEnabled && !loading && (
+                {autoRefreshEnabled && autoRefreshChanged && !loading && (
                   <svg
                     className="absolute inset-0 -rotate-90 pointer-events-none"
                     width={28}
@@ -1349,7 +1648,7 @@ export default function StockInsightModal(props: {
                   >
                     <circle cx={14} cy={14} r={13} fill="none" stroke="currentColor" strokeOpacity={0.15} strokeWidth={2} />
                     <circle
-                      cx={14} cy={14} r={13} fill="none" stroke="hsl(var(--primary))" strokeWidth={2} strokeLinecap="round"
+                      cx={14} cy={14} r={13} fill="none" stroke="hsl(var(--primary))" strokeOpacity={1} strokeWidth={2} strokeLinecap="round"
                       strokeDasharray={2 * Math.PI * 13}
                       strokeDashoffset={2 * Math.PI * 13 * (1 - autoRefreshProgress)}
                       style={{ transition: 'stroke-dashoffset 0.1s linear' }}
@@ -1378,6 +1677,9 @@ export default function StockInsightModal(props: {
                   </SelectContent>
                 </Select>
               )}
+              <span className="hidden md:inline-flex h-7 items-center rounded-full border border-border/60 bg-accent/20 px-3 text-[11px] text-muted-foreground">
+                更新 {formatClockTime(lastUpdatedAt)}
+              </span>
               {/* 桌面端：刷新按钮在最后面 */}
               <button
                 onClick={() => handleRefreshAll()}
@@ -1385,7 +1687,7 @@ export default function StockInsightModal(props: {
                 className="hidden md:flex w-8 h-8 rounded-xl items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all disabled:opacity-50 relative"
                 title="刷新"
               >
-                {autoRefreshEnabled && !loading && (
+                {autoRefreshEnabled && autoRefreshChanged && !loading && (
                   <svg
                     className="absolute inset-0 -rotate-90 pointer-events-none"
                     width={28}
@@ -1394,7 +1696,7 @@ export default function StockInsightModal(props: {
                   >
                     <circle cx={14} cy={14} r={13} fill="none" stroke="currentColor" strokeOpacity={0.15} strokeWidth={2} />
                     <circle
-                      cx={14} cy={14} r={13} fill="none" stroke="hsl(var(--primary))" strokeWidth={2} strokeLinecap="round"
+                      cx={14} cy={14} r={13} fill="none" stroke="hsl(var(--primary))" strokeOpacity={1} strokeWidth={2} strokeLinecap="round"
                       strokeDasharray={2 * Math.PI * 13}
                       strokeDashoffset={2 * Math.PI * 13 * (1 - autoRefreshProgress)}
                       style={{ transition: 'stroke-dashoffset 0.1s linear' }}
@@ -1404,6 +1706,12 @@ export default function StockInsightModal(props: {
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               </button>
             </div>
+          </div>
+
+          <div className="md:hidden mb-3">
+            <span className="inline-flex h-7 items-center rounded-full border border-border/60 bg-accent/20 px-3 text-[11px] text-muted-foreground">
+              更新 {formatClockTime(lastUpdatedAt)}
+            </span>
           </div>
 
           <div className="max-h-[68vh] overflow-y-auto overflow-x-hidden pr-1 scrollbar">
@@ -1638,15 +1946,13 @@ export default function StockInsightModal(props: {
             )}
 
             {tab === 'kline' && (
-              <div className="card p-4">
-                <InteractiveKline
-                  symbol={symbol}
-                  market={market}
-                  initialInterval={klineInterval}
-                  hideRefreshButton
-                  refreshTrigger={klineRefreshTrigger}
-                />
-              </div>
+              <InteractiveKline
+                symbol={symbol}
+                market={market}
+                initialInterval={klineInterval}
+                hideRefreshButton
+                refreshTrigger={klineRefreshTrigger}
+              />
             )}
 
             {tab === 'reports' && (
@@ -1654,9 +1960,8 @@ export default function StockInsightModal(props: {
                 <div className="card p-3">
                   <div className="flex items-center gap-1">
                     {([
-                      { key: 'premarket_outlook', label: '盘前' },
-                      { key: 'daily_report', label: '盘后' },
-                      { key: 'news_digest', label: '新闻' },
+                      { key: 'premarket_outlook', label: `盘前 (${reportCounts.premarket_outlook})` },
+                      { key: 'daily_report', label: `盘后 (${reportCounts.daily_report})` },
                     ] as const).map(item => (
                       <button
                         key={item.key}
@@ -1685,7 +1990,7 @@ export default function StockInsightModal(props: {
                     )}
                     <div className="rounded-lg bg-accent/10 p-3">
                       <div className="prose prose-sm dark:prose-invert max-w-none text-foreground/90 break-words">
-                        <ReactMarkdown>{activeReport.content || '暂无报告内容'}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{activeReport.content || '暂无报告内容'}</ReactMarkdown>
                       </div>
                     </div>
                     {(activeReport.prompt_context || activeReport.context_payload || activeReport.news_debug) && (
@@ -1839,6 +2144,46 @@ export default function StockInsightModal(props: {
               </div>
             )}
 
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={sharePreviewOpen} onOpenChange={setSharePreviewOpen}>
+        <DialogContent className="w-[94vw] max-w-5xl h-[94vh] p-4 md:p-5 overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="text-base">分享图片预览</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 flex-1 min-h-0 flex flex-col">
+            {!!holdingAgg && (
+              <div className="card p-3 flex items-center gap-4 flex-wrap">
+                <div className="text-[12px] text-muted-foreground">持仓指标</div>
+                <div className="flex items-center gap-2">
+                  <Switch checked={includeHoldingPnlRate} onCheckedChange={setIncludeHoldingPnlRate} />
+                  <span className="text-[12px]">收益率</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch checked={includeHoldingPnlAmount} onCheckedChange={setIncludeHoldingPnlAmount} />
+                  <span className="text-[12px]">收益金额</span>
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-border/60 bg-muted/20 p-2 flex-1 min-h-0 overflow-hidden h-[52vh] md:h-[calc(94vh-220px)]">
+              {sharePreviewUrl ? (
+                <div className="w-full h-full flex items-center justify-center">
+                  <img src={sharePreviewUrl} alt="分享图预览" className="max-w-full max-h-full w-auto h-full rounded-lg object-contain" />
+                </div>
+              ) : (
+                <div className="h-[220px] flex items-center justify-center text-[12px] text-muted-foreground">预览图生成中...</div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="secondary" onClick={() => setSharePreviewOpen(false)}>取消</Button>
+              <Button onClick={handleSaveShareImage} disabled={!sharePreviewUrl || imageExporting}>
+                {imageExporting ? '生成中...' : '保存图片'}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

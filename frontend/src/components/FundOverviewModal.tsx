@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { TrendingUp, TrendingDown, RefreshCw, Share2, Copy, Download, ExternalLink, Bell } from 'lucide-react'
 import { fetchAPI, insightApi, stocksApi } from '@panwatch/api'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
@@ -97,11 +98,10 @@ interface FundQuote {
 
 type TimeRange = '1m' | '3m' | '6m' | '1y' | '3y' | 'all'
 type FundTab = 'overview' | 'performance' | 'suggestions' | 'reports' | 'announcements' | 'news'
-type ReportTab = 'fund_holding_analyst' | 'news_digest'
+type ReportTab = 'fund_holding_analyst'
 
 const AGENT_LABELS: Record<string, string> = {
-  fund_holding_analyst: '基金周报',
-  news_digest: '新闻速递',
+  fund_holding_analyst: '分析',
 }
 
 function parseToMs(input?: string): number | null {
@@ -143,6 +143,18 @@ function formatTime(isoTime?: string): string {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function formatClockTime(value?: string | number | Date | null): string {
+  if (value == null || value === '') return '--:--:--'
+  const d = value instanceof Date ? value : new Date(value)
+  if (isNaN(d.getTime())) return '--:--:--'
+  return d.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
     hour12: false,
   })
 }
@@ -231,6 +243,7 @@ export default function FundOverviewModal({
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true)
   const [autoRefreshSec, setAutoRefreshSec] = useState<number>(60)
   const [autoRefreshProgress, setAutoRefreshProgress] = useState(0)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [holdingAgg, setHoldingAgg] = useState<{
     quantity: number
     cost: number
@@ -241,6 +254,10 @@ export default function FundOverviewModal({
   } | null>(null)
   const [holdingLoaded, setHoldingLoaded] = useState(false)
   const [imageExporting, setImageExporting] = useState(false)
+  const [sharePreviewOpen, setSharePreviewOpen] = useState(false)
+  const [sharePreviewUrl, setSharePreviewUrl] = useState('')
+  const [includeHoldingPnlRate, setIncludeHoldingPnlRate] = useState(true)
+  const [includeHoldingPnlAmount, setIncludeHoldingPnlAmount] = useState(true)
   const [fundQuote, setFundQuote] = useState<FundQuote | null>(null)
 
   const miniChartWidth = 320
@@ -257,6 +274,7 @@ export default function FundOverviewModal({
     try {
       const resp = await fetchAPI<FundOverview>(`/stocks/funds/${encodeURIComponent(fundCode)}/overview`)
       setData(resp)
+      setLastUpdatedAt(Date.now())
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载基金详情失败')
     } finally {
@@ -270,6 +288,7 @@ export default function FundOverviewModal({
     try {
       const resp = await fetchAPI<FundQuote>(`/quotes/${encodeURIComponent(fundCode)}?market=FUND`)
       setFundQuote(resp)
+      setLastUpdatedAt(Date.now())
     } catch {
       setFundQuote(null)
     }
@@ -301,6 +320,7 @@ export default function FundOverviewModal({
       } else {
         setHoldingAgg(null)
       }
+      setLastUpdatedAt(Date.now())
     } catch {
       setHoldingAgg(null)
     } finally {
@@ -325,6 +345,7 @@ export default function FundOverviewModal({
       params.set('names', fundName || fundCode)
       const rows = await fetchAPI<NewsItem[]>(`/news?${params.toString()}`)
       setNews(rows || [])
+      setLastUpdatedAt(Date.now())
     } catch {
       setNews([])
     } finally {
@@ -339,6 +360,7 @@ export default function FundOverviewModal({
       params.set('names', fundName || fundCode)
       const rows = await fetchAPI<NewsItem[]>(`/news?${params.toString()}`)
       setAnnouncements(rows || [])
+      setLastUpdatedAt(Date.now())
     } catch {
       setAnnouncements([])
     }
@@ -369,6 +391,7 @@ export default function FundOverviewModal({
         meta: item.meta,
       })) as SuggestionInfo[]
       setSuggestions(list)
+      setLastUpdatedAt(Date.now())
     } catch {
       setSuggestions([])
     }
@@ -377,8 +400,7 @@ export default function FundOverviewModal({
   const loadReports = useCallback(async () => {
     if (!fundCode) return
     try {
-      // 优先使用基金专属Agent，其次是通用Agent
-      const agents = ['fund_holding_analyst', 'premarket_outlook', 'daily_report', 'news_digest']
+      const agents = ['fund_holding_analyst']
       const bySymbolResults = await Promise.all(
         agents.map(agent =>
           insightApi.history<HistoryRecord[]>({
@@ -418,6 +440,7 @@ export default function FundOverviewModal({
         return bm - am
       })
       setReports(merged)
+      setLastUpdatedAt(Date.now())
     } catch {
       setReports([])
     }
@@ -555,7 +578,7 @@ export default function FundOverviewModal({
     const out: Record<string, HistoryRecord | null> = {
       premarket_outlook: null,
       daily_report: null,
-      news_digest: null,
+      fund_holding_analyst: null,
     }
     for (const r of reports) {
       if (!out[r.agent_name]) out[r.agent_name] = r
@@ -656,58 +679,272 @@ export default function FundOverviewModal({
     }
   }
 
-  const handleExportShareImage = async () => {
-    setImageExporting(true)
-    try {
-      const esc = (s: string) => String(s || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;')
-      const trim = (s: string, n = 42) => {
-        const x = String(s || '')
-        return x.length > n ? `${x.slice(0, n - 1)}…` : x
+  const holdingPnlRate = useMemo(() => {
+    if (!holdingAgg || holdingAgg.cost <= 0) return null
+    return (holdingAgg.pnl / holdingAgg.cost) * 100
+  }, [holdingAgg])
+
+  const shareImageWidth = 1200
+  const shareImageHeight = 1680
+
+  const toTwoCharActionLabel = (actionRaw: unknown, labelRaw: unknown, shouldAlert: boolean): string => {
+    const action = String(actionRaw || '').toLowerCase().trim()
+    const label = String(labelRaw || '').trim()
+
+    if (action === 'dca' || label.includes('定投')) return '定投'
+    if (action === 'add' || action === 'buy' || /加仓|买入|建仓/.test(label)) return '加仓'
+    if (action === 'reduce' || /减仓/.test(label)) return '减仓'
+    if (action === 'sell' || /清仓|卖出/.test(label)) return '清仓'
+    if (action === 'watch' || action === 'hold' || /观望|持有/.test(label)) return '观望'
+    if (action === 'avoid' || /回避/.test(label)) return '回避'
+    if (action === 'alert' || /提示|提醒/.test(label)) return '提示'
+    return shouldAlert ? '提示' : '观望'
+  }
+
+  const buildFundShareSvg = useCallback((opts: { includePnlRate: boolean; includePnlAmount: boolean }) => {
+    const esc = (s: string) => String(s || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+    const trim = (s: string, n = 42) => {
+      const x = String(s || '')
+      return x.length > n ? `${x.slice(0, n - 1)}…` : x
+    }
+
+    const splitLines = (s: string, maxUnits: number, maxLines: number) => {
+      const text = String(s || '').replace(/\s+/g, ' ').trim()
+      if (!text) return [] as string[]
+
+      const unit = (ch: string) => {
+        if (/\s/.test(ch)) return 0.3
+        if (/[a-zA-Z0-9.%+\-]/.test(ch)) return 0.56
+        if (/[，。；：、！？,.!?:;]/.test(ch)) return 0.45
+        return 1
       }
 
-      const changeColor = positive ? '#ef4444' : '#10b981'
-      const ts = new Date().toLocaleString('zh-CN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      })
+      const lines: string[] = []
+      let i = 0
+      while (i < text.length && lines.length < maxLines) {
+        let width = 0
+        let j = i
+        let lastBreak = -1
+        while (j < text.length) {
+          const ch = text[j]
+          if (ch === '\n') {
+            break
+          }
+          width += unit(ch)
+          if (/[，。；：、！？,.!?:;\s]/.test(ch)) lastBreak = j
+          if (width > maxUnits) {
+            if (lastBreak >= i) j = lastBreak + 1
+            break
+          }
+          j += 1
+        }
 
-      const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="800" height="420" viewBox="0 0 800 420">
+        if (j <= i) j = Math.min(i + 1, text.length)
+        let line = text.slice(i, j).trim()
+        if (!line && i < text.length) {
+          line = text.slice(i, Math.min(i + 1, text.length))
+          j = i + 1
+        }
+        lines.push(line)
+
+        i = j
+        while (i < text.length && /\s/.test(text[i])) i += 1
+        if (i < text.length && text[i] === '\n') i += 1
+      }
+
+      if (i < text.length && lines.length > 0) {
+        const last = lines.length - 1
+        lines[last] = `${lines[last].slice(0, Math.max(1, lines[last].length - 1))}…`
+      }
+      return lines
+    }
+
+    const suggestion = suggestions[0] || null
+    const action = String(suggestion?.action || '').toLowerCase()
+    const actionLabel = toTwoCharActionLabel(
+      suggestion?.action,
+      suggestion?.action_label,
+      !!suggestion?.should_alert,
+    )
+    const actionColor = action === 'avoid' || action === 'sell'
+      ? '#8f6b2f'
+      : action === 'reduce'
+        ? '#9b7e42'
+        : action === 'buy' || action === 'add'
+          ? '#2f855a'
+          : '#6b7280'
+    const actionBg = action === 'avoid' || action === 'sell'
+      ? '#f6ead1'
+      : action === 'reduce'
+        ? '#f6edd9'
+        : action === 'buy' || action === 'add'
+          ? '#e7f6ea'
+          : '#eceff3'
+
+    const topLeftIsHolding = opts.includePnlRate && holdingPnlRate != null
+    const topRightIsHolding = opts.includePnlAmount && !!holdingAgg
+    const bothHoldingTogglesOff = !opts.includePnlRate && !opts.includePnlAmount
+    const anyHoldingToggleOn = opts.includePnlRate || opts.includePnlAmount
+    const showTechCard = opts.includePnlRate || opts.includePnlAmount
+    const gainRate = topLeftIsHolding ? holdingPnlRate : sinceReturn
+    const gainAmount = topRightIsHolding ? (holdingAgg?.pnl ?? null) : (bothHoldingTogglesOff ? latestNav : sinceReturn)
+    const gainRateColor = gainRate >= 0 ? '#2f855a' : '#b45309'
+    const gainAmountColor = bothHoldingTogglesOff
+      ? '#2f2a23'
+      : (gainAmount != null ? (gainAmount >= 0 ? '#2f855a' : '#b45309') : '#6b7280')
+    const leftTitle = topLeftIsHolding ? '当前收益率:' : '成立来涨跌:'
+    const rightTitle = topRightIsHolding ? '累计收益金额:' : (bothHoldingTogglesOff ? '单位净值:' : '成立以来:')
+    const rightValue = gainAmount == null
+      ? '--'
+      : bothHoldingTogglesOff
+        ? gainAmount.toFixed(4)
+        : `${gainAmount >= 0 ? '+' : ''}${gainAmount.toFixed(2)}${topRightIsHolding ? '' : '%'}`
+
+    const signalLines = splitLines(
+      suggestion?.signal || ((data?.top_holdings || []).slice(0, 4).map((h) => h.name).join('、') || '暂无明显信号，建议等待更清晰结构。'),
+      10.4,
+      4,
+    )
+    const reasonLines = splitLines(
+      suggestion?.reason || `区间涨跌 ${rangeReturn >= 0 ? '+' : ''}${rangeReturn.toFixed(2)}%，最新净值 ${latestNav?.toFixed(4) || '--'}。`,
+      10.4,
+      4,
+    )
+    const riskSource = (
+      (suggestion?.meta as Record<string, any> | undefined)?.risk
+      || (suggestion?.meta as Record<string, any> | undefined)?.risk_tip
+      || (suggestion?.meta as Record<string, any> | undefined)?.risk_warning
+      || suggestion?.prompt_context
+      || ''
+    )
+    const riskLines = splitLines(
+      riskSource || (rangeReturn >= 0 ? '短线涨幅偏高，注意回撤与波动放大。' : '弱势阶段优先控制仓位，谨防继续走弱。'),
+      10.4,
+      4,
+    )
+
+    const sourceLabel = suggestion?.agent_label || '基金分析'
+    const sourceTime = suggestion?.created_at
+      ? formatClockTime(suggestion.created_at)
+      : formatClockTime(fundQuote?.gztime || Date.now())
+
+    const ts = new Date().toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+    const holdingMetrics: string[] = []
+    if (holdingAgg && holdingAgg.quantity > 0) {
+      if (opts.includePnlRate && holdingPnlRate != null) {
+        holdingMetrics.push(`持仓收益率 ${holdingPnlRate >= 0 ? '+' : ''}${holdingPnlRate.toFixed(2)}%`)
+      }
+      if (opts.includePnlAmount) {
+        holdingMetrics.push(`持仓收益额 ${holdingAgg.pnl >= 0 ? '+' : ''}${holdingAgg.pnl.toFixed(2)}`)
+      }
+    }
+    const showBottomDetails = true
+    const showHolding = false
+    const holdingRefLines = showBottomDetails
+      ? splitLines(
+          `重仓参考: ${((data?.top_holdings || []).slice(0, 6).map((h) => h.name).join(' / ') || '--')}`,
+          44,
+          2,
+        )
+      : []
+    const techLeftTitle = anyHoldingToggleOn ? '成立以来' : '区间涨跌'
+    const techLeftValue = anyHoldingToggleOn ? sinceReturn : rangeReturn
+    const techLeftColor = techLeftValue >= 0 ? '#2f855a' : '#b45309'
+    const holdingsBaseY = showTechCard ? 1548 : 1454
+    const metricsY = holdingsBaseY + holdingRefLines.length * 32 + 20
+    const lastRefY = holdingRefLines.length > 0 ? (holdingsBaseY + (holdingRefLines.length - 1) * 32) : holdingsBaseY
+    const desiredSourceY = showHolding ? (metricsY + 34) : (lastRefY + 30)
+    const sourceY = Math.min(showTechCard ? 1578 : 1546, desiredSourceY)
+
+    return `
+<svg xmlns="http://www.w3.org/2000/svg" width="${shareImageWidth}" height="${shareImageHeight}" viewBox="0 0 ${shareImageWidth} ${shareImageHeight}">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0b1220"/>
-      <stop offset="100%" stop-color="#111827"/>
+      <stop offset="0%" stop-color="#f3efe7"/>
+      <stop offset="100%" stop-color="#e9e3d9"/>
     </linearGradient>
+    <linearGradient id="topPanel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7faf7"/>
+      <stop offset="100%" stop-color="#e9f6ed"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.94"/>
+      <stop offset="100%" stop-color="#f7f4ee" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#5e5544" flood-opacity="0.16"/>
+    </filter>
   </defs>
-  <rect x="0" y="0" width="800" height="420" fill="url(#bg)"/>
-  <rect x="30" y="20" width="740" height="380" rx="18" fill="#0f172a" stroke="#1f2937"/>
-  <text x="56" y="70" fill="#93c5fd" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">PanWatch 基金洞察</text>
-  <text x="56" y="110" fill="#f8fafc" font-size="32" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(`${resolvedName}（${fundCode}）`, 28))}</text>
-  <text x="56" y="148" fill="#94a3b8" font-size="18" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(ts)}</text>
 
-  <text x="56" y="210" fill="#94a3b8" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">成立来涨跌</text>
-  <text x="200" y="210" fill="${changeColor}" font-size="36" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${positive ? '+' : ''}${sinceReturn.toFixed(2)}%</text>
+  <rect x="0" y="0" width="1200" height="1680" fill="url(#bg)"/>
+  <rect x="64" y="58" width="1072" height="1560" rx="38" fill="url(#glass)" stroke="#d6ccbd" filter="url(#softShadow)"/>
 
-  <text x="56" y="270" fill="#94a3b8" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">最新净值</text>
-  <text x="200" y="270" fill="#f8fafc" font-size="28" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${latestNav?.toFixed(4) || '--'}</text>
+  <text x="94" y="116" fill="#6e6252" font-size="36" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(ts)}</text>
+  <text x="1106" y="116" fill="#5f5649" font-size="56" text-anchor="end" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">Pan1Watch</text>
 
-  <text x="56" y="320" fill="#94a3b8" font-size="18" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">十大持仓股票</text>
-  <text x="56" y="350" fill="#cbd5e1" font-size="16" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim((data?.top_holdings || []).slice(0, 5).map(h => h.name).join('、'), 60))}</text>
+  <rect x="94" y="162" width="1012" height="264" rx="30" fill="url(#topPanel)" stroke="#cce4d0"/>
+  <line x1="600" y1="198" x2="600" y2="390" stroke="#d7e7db"/>
+  <text x="142" y="244" fill="#23201b" font-size="52" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${leftTitle}</text>
+  <text x="642" y="244" fill="#23201b" font-size="52" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${rightTitle}</text>
+  <text x="142" y="356" fill="${gainRateColor}" font-size="84" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${gainRate >= 0 ? '+' : ''}${gainRate.toFixed(2)}%</text>
+  <text x="642" y="356" fill="${gainAmountColor}" font-size="74" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${rightValue}</text>
 
-  <text x="56" y="388" fill="#64748b" font-size="14" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">数据来源：东方财富 · 仅供参考，不构成投资建议</text>
+  <rect x="94" y="446" width="676" height="274" rx="30" fill="#fffdfa" stroke="#d9d0c2"/>
+  <text x="130" y="520" fill="#1f1c17" font-size="62" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(resolvedName, 12))}</text>
+  <text x="130" y="588" fill="#2a251f" font-size="42" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">(${esc(fundCode)} · 基金)</text>
+  <text x="130" y="660" fill="#2a251f" font-size="54" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">估值 ${fundQuote?.current_price != null ? fundQuote.current_price.toFixed(4) : '--'} <tspan fill="${(fundQuote?.change_pct || 0) >= 0 ? '#2f855a' : '#b45309'}">(${(fundQuote?.change_pct || 0) >= 0 ? '+' : ''}${fundQuote?.change_pct != null ? fundQuote.change_pct.toFixed(2) : '--'}%)</tspan></text>
+
+  <rect x="790" y="446" width="316" height="274" rx="30" fill="${actionBg}" stroke="#d8ccb3"/>
+  <text x="832" y="530" fill="#5a4c37" font-size="54" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">建议</text>
+  <text x="850" y="640" fill="${actionColor}" font-size="86" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(actionLabel)}</text>
+  <text x="948" y="700" text-anchor="middle" fill="#6f6658" font-size="24" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(sourceLabel)} · ${esc(sourceTime)}</text>
+
+  <rect x="94" y="800" width="1012" height="560" rx="30" fill="#fffdf9" stroke="#d9d0c2"/>
+  <line x1="430" y1="832" x2="430" y2="1324" stroke="#d8d0c4"/>
+  <line x1="764" y1="832" x2="764" y2="1324" stroke="#d8d0c4"/>
+
+  <text x="130" y="898" fill="#221f1a" font-size="64" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">信号</text>
+  <text x="464" y="898" fill="#221f1a" font-size="64" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">理由</text>
+  <text x="798" y="898" fill="#221f1a" font-size="64" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">风险</text>
+
+  ${(signalLines.length ? signalLines : ['暂无']).map((line, idx) => `<text x="130" y="${986 + idx * 64}" fill="#2d2923" font-size="30" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('')}
+  ${(reasonLines.length ? reasonLines : ['暂无']).map((line, idx) => `<text x="464" y="${986 + idx * 64}" fill="#2d2923" font-size="30" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('')}
+  ${(riskLines.length ? riskLines : ['暂无']).map((line, idx) => `<text x="798" y="${986 + idx * 64}" fill="#2d2923" font-size="30" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('')}
+
+  ${showTechCard ? `<rect x="94" y="1392" width="1012" height="116" rx="20" fill="#f3f7f4" stroke="#cfe0d4"/>
+  <line x1="600" y1="1410" x2="600" y2="1488" stroke="#d7e5da"/>
+  <text x="130" y="1436" fill="#5f5649" font-size="20" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${techLeftTitle}</text>
+  <text x="130" y="1478" fill="${techLeftColor}" font-size="32" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${techLeftValue >= 0 ? '+' : ''}${techLeftValue.toFixed(2)}%</text>
+  <text x="640" y="1436" fill="#5f5649" font-size="20" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">单位净值</text>
+  <text x="640" y="1478" fill="#2f2a23" font-size="32" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${latestNav?.toFixed(4) || '--'}</text>` : ''}
+  ${showBottomDetails ? (holdingRefLines.length ? holdingRefLines : ['重仓参考: --']).map((line, idx) => `<text x="110" y="${holdingsBaseY + idx * 32}" fill="#7b7163" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(line)}</text>`).join('') : ''}
+
+  ${showHolding ? `<text x="110" y="${metricsY}" fill="#7b7163" font-size="20" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">${esc(trim(holdingMetrics.join('  ·  '), 64))}</text>` : ''}
+  ${showBottomDetails ? `<text x="110" y="${sourceY}" fill="#918573" font-size="18" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif">数据来源：东方财富与 Pan1Watch · 仅供参考，不构成投资建议</text>` : ''}
 </svg>`
+  }, [data?.top_holdings, fundCode, fundQuote?.change_pct, fundQuote?.current_price, fundQuote?.gztime, holdingAgg, holdingPnlRate, latestNav, rangeReturn, resolvedName, sinceReturn, suggestions])
 
-      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
+  const renderFundSharePreview = useCallback(async (opts?: { includePnlRate: boolean; includePnlAmount: boolean }) => {
+    const svg = buildFundShareSvg(opts || {
+      includePnlRate: includeHoldingPnlRate,
+      includePnlAmount: includeHoldingPnlAmount,
+    })
+
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    try {
       const img = await new Promise<HTMLImageElement>((resolve, reject) => {
         const el = new Image()
         el.onload = () => resolve(el)
@@ -715,26 +952,61 @@ export default function FundOverviewModal({
         el.src = url
       })
       const canvas = document.createElement('canvas')
-      canvas.width = 800
-      canvas.height = 420
+      canvas.width = shareImageWidth
+      canvas.height = shareImageHeight
       const ctx = canvas.getContext('2d')
       if (!ctx) throw new Error('无法创建画布')
       ctx.drawImage(img, 0, 0)
+      return canvas.toDataURL('image/png')
+    } finally {
       URL.revokeObjectURL(url)
-      const png = canvas.toDataURL('image/png')
-      const a = document.createElement('a')
-      a.href = png
-      a.download = `panwatch-fund-${fundCode}-${Date.now()}.png`
-      a.click()
-      toast('分享图片已生成并下载', 'success')
+    }
+  }, [buildFundShareSvg, includeHoldingPnlAmount, includeHoldingPnlRate, shareImageHeight, shareImageWidth])
+
+  const handleOpenFundSharePreview = useCallback(async () => {
+    setImageExporting(true)
+    try {
+      const png = await renderFundSharePreview()
+      setSharePreviewUrl(png)
+      setSharePreviewOpen(true)
     } catch {
       toast('图片生成失败，请稍后重试', 'error')
     } finally {
       setImageExporting(false)
     }
-  }
+  }, [renderFundSharePreview, toast])
+
+  const handleSaveFundShareImage = useCallback(() => {
+    if (!sharePreviewUrl) return
+    const a = document.createElement('a')
+    a.href = sharePreviewUrl
+    a.download = `Pan1Watch-FUND-${fundCode}-${Date.now()}.png`
+    a.click()
+    toast('分享图片已保存', 'success')
+  }, [fundCode, sharePreviewUrl, toast])
+
+  useEffect(() => {
+    if (!sharePreviewOpen) return
+    let cancelled = false
+    setImageExporting(true)
+    renderFundSharePreview({
+      includePnlRate: includeHoldingPnlRate,
+      includePnlAmount: includeHoldingPnlAmount,
+    })
+      .then((png) => {
+        if (!cancelled) setSharePreviewUrl(png)
+      })
+      .catch(() => {
+        if (!cancelled) toast('预览图更新失败', 'error')
+      })
+      .finally(() => {
+        if (!cancelled) setImageExporting(false)
+      })
+    return () => { cancelled = true }
+  }, [includeHoldingPnlAmount, includeHoldingPnlRate, renderFundSharePreview, sharePreviewOpen, toast])
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[92vw] max-w-6xl p-5 md:p-6 overflow-hidden">
         <DialogHeader className="mb-3">
@@ -748,7 +1020,7 @@ export default function FundOverviewModal({
               </DialogTitle>
             </div>
             <div className="hidden md:flex items-center gap-2">
-              <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={() => handleExportShareImage()} disabled={imageExporting}>
+              <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={() => handleOpenFundSharePreview()} disabled={imageExporting}>
                 <Download className={`w-3.5 h-3.5 ${imageExporting ? 'animate-pulse' : ''}`} />
                 <span>{imageExporting ? '生成中' : '图片'}</span>
               </Button>
@@ -771,14 +1043,14 @@ export default function FundOverviewModal({
                 {watchToggleLoading ? '处理中...' : (watchingStock ? (hasHolding ? '持仓中' : '取消关注') : '快速关注')}
               </Button>
               <StockPriceAlertPanel mode="inline" symbol={fundCode} market="FUND" stockName={resolvedName} />
-              <Button variant="secondary" size="sm" className="h-8 px-2.5" onClick={handleSetAlert} disabled={alerting || !watchingStock}>
+              <Button variant="secondary" size="sm" className="h-8 px-2.5 hidden" onClick={handleSetAlert} disabled={alerting || !watchingStock}>
                 <Bell className="w-3.5 h-3.5" />
                 <span>{alerting ? '设置中...' : '一键设提醒'}</span>
               </Button>
             </div>
           </div>
           <div className="flex md:hidden items-center gap-2 mt-2 overflow-x-auto scrollbar-none pb-1 -mb-1">
-            <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={() => handleExportShareImage()} disabled={imageExporting}>
+            <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={() => handleOpenFundSharePreview()} disabled={imageExporting}>
               <Download className={`w-3.5 h-3.5 ${imageExporting ? 'animate-pulse' : ''}`} />
             </Button>
             <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={handleShare}>
@@ -797,7 +1069,7 @@ export default function FundOverviewModal({
               {watchToggleLoading ? '处理中...' : (watchingStock ? (hasHolding ? '持仓中' : '取消关注') : '快速关注')}
             </Button>
             <StockPriceAlertPanel mode="inline" symbol={fundCode} market="FUND" stockName={resolvedName} />
-            <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0" onClick={handleSetAlert} disabled={alerting || !watchingStock}>
+            <Button variant="secondary" size="sm" className="h-8 px-2.5 shrink-0 hidden" onClick={handleSetAlert} disabled={alerting || !watchingStock}>
               <Bell className="w-3.5 h-3.5" />
               <span>{alerting ? '设置中...' : '一键设提醒'}</span>
             </Button>
@@ -871,6 +1143,9 @@ export default function FundOverviewModal({
                 </SelectContent>
               </Select>
             )}
+            <span className="hidden md:inline-flex h-7 items-center rounded-full border border-border/60 bg-accent/20 px-3 text-[11px] text-muted-foreground">
+              更新 {formatClockTime(lastUpdatedAt)}
+            </span>
             {/* 桌面端：刷新按钮在最后面 */}
             <button
               onClick={() => handleRefreshAll()}
@@ -897,6 +1172,12 @@ export default function FundOverviewModal({
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             </button>
           </div>
+        </div>
+
+        <div className="md:hidden mb-3">
+          <span className="inline-flex h-7 items-center rounded-full border border-border/60 bg-accent/20 px-3 text-[11px] text-muted-foreground">
+            更新 {formatClockTime(lastUpdatedAt)}
+          </span>
         </div>
 
         <div className="max-h-[68vh] overflow-y-auto overflow-x-hidden pr-1 scrollbar">
@@ -1153,8 +1434,7 @@ export default function FundOverviewModal({
               <div className="card p-3">
                 <div className="flex items-center gap-1">
                   {([
-                    { key: 'fund_holding_analyst', label: '基金周报' },
-                    { key: 'news_digest', label: '新闻' },
+                    { key: 'fund_holding_analyst', label: '分析' },
                   ] as const).map(item => (
                     <button
                       key={item.key}
@@ -1183,7 +1463,7 @@ export default function FundOverviewModal({
                   )}
                   <div className="rounded-lg bg-accent/10 p-3">
                     <div className="prose prose-sm dark:prose-invert max-w-none text-foreground/90 break-words">
-                      <ReactMarkdown>{activeReport.content || '暂无报告内容'}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{activeReport.content || '暂无报告内容'}</ReactMarkdown>
                     </div>
                   </div>
                 </div>
@@ -1230,5 +1510,46 @@ export default function FundOverviewModal({
         </div>
       </DialogContent>
     </Dialog>
+
+    <Dialog open={sharePreviewOpen} onOpenChange={setSharePreviewOpen}>
+      <DialogContent className="w-[94vw] max-w-5xl h-[94vh] p-4 md:p-5 overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="text-base">分享图片预览</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 flex-1 min-h-0 flex flex-col">
+          {!!holdingAgg && (
+            <div className="card p-3 flex items-center gap-4 flex-wrap">
+              <div className="text-[12px] text-muted-foreground">持仓指标</div>
+              <div className="flex items-center gap-2">
+                <Switch checked={includeHoldingPnlRate} onCheckedChange={setIncludeHoldingPnlRate} />
+                <span className="text-[12px]">收益率</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch checked={includeHoldingPnlAmount} onCheckedChange={setIncludeHoldingPnlAmount} />
+                <span className="text-[12px]">收益金额</span>
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-xl border border-border/60 bg-muted/20 p-2 flex-1 min-h-0 overflow-hidden h-[52vh] md:h-[calc(94vh-220px)]">
+            {sharePreviewUrl ? (
+              <div className="w-full h-full flex items-center justify-center">
+                <img src={sharePreviewUrl} alt="基金分享图预览" className="max-w-full max-h-full w-auto h-full rounded-lg object-contain" />
+              </div>
+            ) : (
+              <div className="h-[220px] flex items-center justify-center text-[12px] text-muted-foreground">预览图生成中...</div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" onClick={() => setSharePreviewOpen(false)}>取消</Button>
+            <Button onClick={handleSaveFundShareImage} disabled={!sharePreviewUrl || imageExporting}>
+              {imageExporting ? '生成中...' : '保存图片'}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }

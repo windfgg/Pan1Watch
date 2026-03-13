@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, BarChart3, LayoutGrid, List, FileText } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { fetchAPI, stocksApi, type AIService, type NotifyChannel } from '@panwatch/api'
 import { useLocalStorage } from '@/lib/utils'
+import { sanitizeReportContent } from '@/lib/report-content'
 import { useRefreshReceiver, useAutoRefreshProgress } from '@/hooks/use-global-refresh'
 import { SuggestionBadge, type SuggestionInfo, type KlineSummary } from '@panwatch/biz-ui/components/suggestion-badge'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
@@ -186,6 +188,69 @@ interface PositionForm {
   stock_symbol: string
   stock_name: string
   stock_market: string
+}
+
+interface PositionTradeRecord {
+  id: number
+  position_id: number
+  action: 'create' | 'add' | 'reduce' | 'overwrite'
+  quantity: number
+  price: number
+  amount: number | null
+  before_quantity: number
+  after_quantity: number
+  before_cost_price: number
+  after_cost_price: number
+  trade_date: string | null
+  note: string | null
+  created_at: string | null
+}
+
+interface PositionTradeListResponse {
+  items: PositionTradeRecord[]
+  count: number
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+}
+
+interface IntelNewsItem {
+  source: string
+  source_label: string
+  external_id: string
+  title: string
+  content: string
+  publish_time: string
+  symbols: string[]
+  importance: number
+  url: string
+}
+
+interface IntelNewsPagedResponse {
+  items: IntelNewsItem[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+}
+
+interface IntelReportItem {
+  id: number
+  agent_name: string
+  stock_symbol: string
+  analysis_date: string
+  title: string
+  content: string
+  updated_at: string
+}
+
+interface IntelReportPagedResponse {
+  items: IntelReportItem[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
 }
 
 // 股票建议信息（来自盘中监控 API）
@@ -439,6 +504,10 @@ export default function StocksPage() {
   const [refreshInterval, setRefreshInterval] = useLocalStorage('panwatch_stocks_refreshInterval', 30)
   const [displayCurrency, setDisplayCurrency] = useLocalStorage<'CNY' | 'HKD' | 'USD'>('panwatch_stocks_display_currency', 'CNY')
   const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null)
+  const [isTabVisible, setIsTabVisible] = useState<boolean>(() => {
+    if (typeof document === 'undefined') return true
+    return document.visibilityState !== 'hidden'
+  })
   const [, setNextAutoRefreshAt] = useState<number | null>(null)
   const [, setAutoRefreshTick] = useState<number>(Date.now())
   const refreshTimerRef = useRef<ReturnType<typeof setInterval>>()
@@ -474,6 +543,23 @@ export default function StocksPage() {
   const [fundOverviewOpen, setFundOverviewOpen] = useState(false)
   const [fundOverviewSymbol, setFundOverviewSymbol] = useState('')
   const [fundOverviewName, setFundOverviewName] = useState<string | undefined>(undefined)
+  const [intelModalOpen, setIntelModalOpen] = useState(false)
+  const [intelSymbol, setIntelSymbol] = useState('')
+  const [intelMarket, setIntelMarket] = useState('CN')
+  const [intelName, setIntelName] = useState<string | undefined>(undefined)
+  const [intelTab, setIntelTab] = useState<'report' | 'news'>('report')
+  const [intelLoading, setIntelLoading] = useState(false)
+  const [intelReportItems, setIntelReportItems] = useState<IntelReportItem[]>([])
+  const [intelReportTotal, setIntelReportTotal] = useState(0)
+  const [intelReportPage, setIntelReportPage] = useState(1)
+  const [intelNewsItems, setIntelNewsItems] = useState<IntelNewsItem[]>([])
+  const [intelNewsTotal, setIntelNewsTotal] = useState(0)
+  const [intelNewsPage, setIntelNewsPage] = useState(1)
+  const [intelSelectedReportId, setIntelSelectedReportId] = useState<number | null>(null)
+  const [intelSelectedNewsIdx, setIntelSelectedNewsIdx] = useState<number | null>(null)
+  const [intelSearchQuery, setIntelSearchQuery] = useState('')
+  const [intelViewMode, setIntelViewMode] = useState<'catalog' | 'list'>('catalog')
+  const intelPageSize = 5
 
   // Market status
   const [marketStatus, setMarketStatus] = useState<MarketStatus[]>([])
@@ -499,6 +585,13 @@ export default function StocksPage() {
   const [positionDialogOpen, setPositionDialogOpen] = useState(false)
   const [positionForm, setPositionForm] = useState<PositionForm>({ account_id: 0, stock_id: 0, cost_price: '', quantity: '', invested_amount: '', trading_style: '', stock_symbol: '', stock_name: '', stock_market: 'CN' })
   const [editPositionId, setEditPositionId] = useState<number | null>(null)
+  const [positionEditMode, setPositionEditMode] = useState<'overwrite' | 'add' | 'reduce'>('overwrite')
+  const [positionTradeDate, setPositionTradeDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
+  const [positionTrades, setPositionTrades] = useState<PositionTradeRecord[]>([])
+  const [positionTradesLoading, setPositionTradesLoading] = useState(false)
+  const [positionTradesPage, setPositionTradesPage] = useState(1)
+  const [positionTradesPageSize] = useState(5)
+  const [positionTradesTotal, setPositionTradesTotal] = useState(0)
   const [positionDialogAccountId, setPositionDialogAccountId] = useState<number | null>(null)
   const [positionSearchQuery, setPositionSearchQuery] = useState('')
   const [positionSearchMarket, setPositionSearchMarket] = useState('')  // 搜索市场筛选
@@ -537,7 +630,6 @@ export default function StocksPage() {
   const positionDragSnapshotRef = useRef<PortfolioSummary | null>(null)
 
   const { toast } = useToast()
-  const navigate = useNavigate()
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const moveById = <T extends { id: number }>(list: T[], fromId: number, toId: number): T[] => {
@@ -835,14 +927,119 @@ export default function StocksPage() {
     setKlineDialogOpen(true)
   }, [klineSummaries])
 
-  const openIntelCenter = useCallback((tab: 'news' | 'report', symbol: string, market: string, stockName?: string) => {
-    const params = new URLSearchParams()
-    params.set('tab', tab)
-    params.set('symbol', String(symbol || '').toUpperCase())
-    params.set('market', String(market || 'CN').toUpperCase())
-    if (stockName) params.set('name', stockName)
-    navigate(`/intel?${params.toString()}`)
-  }, [navigate])
+  const openIntelModal = useCallback((symbol: string, market: string, stockName?: string) => {
+    setIntelSymbol(String(symbol || '').toUpperCase())
+    setIntelMarket(String(market || 'CN').toUpperCase())
+    setIntelName(stockName)
+    setIntelTab('report')
+    setIntelReportPage(1)
+    setIntelNewsPage(1)
+    setIntelSelectedReportId(null)
+    setIntelSearchQuery('')
+    setIntelModalOpen(true)
+  }, [])
+
+  useEffect(() => {
+    if (!intelModalOpen || !intelSymbol) return
+    let cancelled = false
+
+    const run = async () => {
+      setIntelLoading(true)
+      try {
+        if (intelTab === 'report') {
+          const searchQ = intelSearchQuery.trim()
+
+          // 有用户搜索词时直接用关键词查询，跳过精确匹配。
+          if (searchQ) {
+            const params = new URLSearchParams()
+            params.set('page', String(intelReportPage))
+            params.set('page_size', String(intelPageSize))
+            params.set('kind', 'all')
+            params.set('q', searchQ)
+            if (intelMarket === 'FUND') params.set('agent_name', 'fund_holding_analyst')
+            const data = await fetchAPI<IntelReportPagedResponse>(`/history/paged?${params.toString()}`)
+            if (!cancelled) {
+              setIntelReportItems(data?.items || [])
+              setIntelReportTotal(Number(data?.total || 0))
+            }
+            return
+          }
+
+          const params = new URLSearchParams()
+          params.set('page', String(intelReportPage))
+          params.set('page_size', String(intelPageSize))
+          params.set('kind', 'all')
+          params.set('stock_symbol', intelSymbol)
+          let data = await fetchAPI<IntelReportPagedResponse>(`/history/paged?${params.toString()}`)
+
+          // 部分历史（尤其基金分析）不会将 stock_symbol 存成实际代码，兜底用关键词逐次检索。
+          if (Number(data?.total || 0) === 0) {
+            const fallbackQueries: string[] = []
+            const trimmedName = (intelName || '').trim()
+            const trimmedSymbol = (intelSymbol || '').trim()
+            const digitsOnlySymbol = trimmedSymbol.replace(/\D/g, '')
+            if (trimmedName) fallbackQueries.push(trimmedName)
+            if (trimmedSymbol) fallbackQueries.push(trimmedSymbol)
+            if (digitsOnlySymbol && digitsOnlySymbol !== trimmedSymbol) fallbackQueries.push(digitsOnlySymbol)
+
+            // 去重并按顺序尝试，任一命中后即停止。
+            for (const q of Array.from(new Set(fallbackQueries))) {
+              const fallbackParams = new URLSearchParams()
+              fallbackParams.set('page', String(intelReportPage))
+              fallbackParams.set('page_size', String(intelPageSize))
+              fallbackParams.set('kind', 'all')
+              fallbackParams.set('q', q)
+              if (intelMarket === 'FUND') fallbackParams.set('agent_name', 'fund_holding_analyst')
+              const fallbackData = await fetchAPI<IntelReportPagedResponse>(`/history/paged?${fallbackParams.toString()}`)
+              if (Number(fallbackData?.total || 0) > 0) {
+                data = fallbackData
+                break
+              }
+            }
+          }
+
+          if (!cancelled) {
+            setIntelReportItems(data?.items || [])
+            setIntelReportTotal(Number(data?.total || 0))
+          }
+          return
+        }
+
+        const params = new URLSearchParams()
+        params.set('page', String(intelNewsPage))
+        params.set('page_size', String(intelPageSize))
+        params.set('hours', '168')
+        params.set('symbols', intelSymbol)
+        if (intelSearchQuery.trim()) params.set('q', intelSearchQuery.trim())
+        const data = await fetchAPI<IntelNewsPagedResponse>(`/news/paged?${params.toString()}`)
+        if (!cancelled) {
+          const items = data?.items || []
+          setIntelNewsItems(items)
+          setIntelNewsTotal(Number(data?.total || 0))
+          setIntelSelectedNewsIdx(items.length > 0 ? 0 : null)
+        }
+      } catch (e) {
+        if (!cancelled) toast(e instanceof Error ? e.message : '加载情报失败', 'error')
+      } finally {
+        if (!cancelled) setIntelLoading(false)
+      }
+    }
+
+    run()
+    return () => {
+      cancelled = true
+    }
+  }, [intelModalOpen, intelSymbol, intelMarket, intelName, intelTab, intelReportPage, intelNewsPage, intelPageSize, intelSearchQuery, toast])
+
+  useEffect(() => {
+    if (!intelModalOpen || intelTab !== 'report') return
+    if (!intelReportItems || intelReportItems.length === 0) {
+      setIntelSelectedReportId(null)
+      return
+    }
+    if (intelSelectedReportId && intelReportItems.some(x => x.id === intelSelectedReportId)) return
+    setIntelSelectedReportId(intelReportItems[0].id)
+  }, [intelModalOpen, intelTab, intelReportItems, intelSelectedReportId])
 
   const openStockDetail = useCallback((stockSymbol: string, stockMarket: string, stockName?: string, hasPosition?: boolean) => {
     if ((stockMarket || '').toUpperCase() === 'FUND') {
@@ -893,7 +1090,7 @@ export default function StocksPage() {
   // 注册全局刷新回调
   useRefreshReceiver(handleRefresh)
 
-  useEffect(() => { load(); loadPortfolio(); loadPoolSuggestions(); loadPriceAlertSummaries(); refreshKlines() }, [])
+  useEffect(() => { load(); loadPortfolio(); loadPoolSuggestions(); loadPriceAlertSummaries() }, [])
 
   // 仅关注列表场景（无持仓）也要在列表加载后预取 K 线摘要，保证技术指标徽章可见
   const watchlistKlineInitDone = useRef(false)
@@ -992,19 +1189,17 @@ export default function StocksPage() {
     }
   }, [loadPoolSuggestions, refreshKlines, toast])
 
-  // 首次加载后，按需刷新 K 线摘要与建议池
-  const initialKlineDone = useRef(false)
   useEffect(() => {
-    if (portfolio && portfolio.accounts.length > 0 && !initialKlineDone.current) {
-      initialKlineDone.current = true
-      refreshKlines()
-      loadPoolSuggestions()
+    const onVisibilityChange = () => {
+      setIsTabVisible(document.visibilityState !== 'hidden')
     }
-  }, [portfolio, refreshKlines, loadPoolSuggestions])
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  }, [])
 
   // Auto-refresh timer
   useEffect(() => {
-    if (autoRefresh) {
+    if (autoRefresh && isTabVisible) {
       const runRefreshCycle = () => {
         refreshQuotes({ silent: true })
         refreshKlines()
@@ -1031,7 +1226,7 @@ export default function StocksPage() {
       tick()
       progressTimerRef.current = setInterval(tick, 100)
     } else {
-      // Clear interval when disabled
+      // 标签页不可见时也暂停自动刷新，避免后台无效请求
       if (refreshTimerRef.current) {
         clearInterval(refreshTimerRef.current)
         refreshTimerRef.current = undefined
@@ -1060,7 +1255,7 @@ export default function StocksPage() {
       }
       setAutoRefreshProgress({ enabled: false, progress: 0 })
     }
-  }, [autoRefresh, refreshInterval, refreshQuotes, refreshKlines, loadPoolSuggestions, setAutoRefreshProgress])
+  }, [autoRefresh, isTabVisible, refreshInterval, refreshQuotes, refreshKlines, loadPoolSuggestions, setAutoRefreshProgress])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -1225,24 +1420,43 @@ export default function StocksPage() {
   }
 
   // ========== Position handlers ==========
+  const loadPositionTrades = useCallback(async (positionId: number, page: number = 1) => {
+    setPositionTradesLoading(true)
+    try {
+      const data = await fetchAPI<PositionTradeListResponse>(`/positions/${positionId}/trades?page=${page}&page_size=${positionTradesPageSize}`)
+      setPositionTrades(data?.items || [])
+      setPositionTradesTotal(Number(data?.total || 0))
+      setPositionTradesPage(Number(data?.page || page))
+    } catch {
+      setPositionTrades([])
+      setPositionTradesTotal(0)
+    } finally {
+      setPositionTradesLoading(false)
+    }
+  }, [positionTradesPageSize])
+
   const openPositionDialog = (accountId: number, position?: Position) => {
     setPositionDialogAccountId(accountId)
     setPositionSearchQuery('')
     setPositionSearchResults([])
     setShowPositionDropdown(false)
+    setPositionTradeDate(new Date().toISOString().slice(0, 10))
     if (position) {
       setPositionForm({
         account_id: accountId,
         stock_id: position.stock_id,
         cost_price: position.cost_price.toString(),
-        quantity: position.quantity.toString(),
+        quantity: '',
         invested_amount: position.invested_amount?.toString() || '',
         trading_style: position.trading_style || '',
         stock_symbol: position.symbol,
         stock_name: position.name,
         stock_market: position.market,
       })
+      setPositionEditMode('add')
       setEditPositionId(position.id)
+      setPositionTradesPage(1)
+      loadPositionTrades(position.id, 1)
     } else {
       setPositionForm({
         account_id: accountId,
@@ -1255,6 +1469,10 @@ export default function StocksPage() {
         stock_name: '',
         stock_market: 'CN',
       })
+      setPositionEditMode('overwrite')
+      setPositionTrades([])
+      setPositionTradesTotal(0)
+      setPositionTradesPage(1)
       setEditPositionId(null)
     }
     setPositionDialogOpen(true)
@@ -1334,22 +1552,71 @@ export default function StocksPage() {
         }
       }
 
+      const parsedQuantity = parseFloat(positionForm.quantity)
+      if (!Number.isFinite(parsedQuantity)) {
+        toast('请输入有效的持仓数量', 'error')
+        return
+      }
+      const market = String(positionForm.stock_market || 'CN').toUpperCase()
+      const qtyText = parsedQuantity.toFixed(10).replace(/0+$/, '').replace(/\.$/, '')
+      const decimalDigits = qtyText.includes('.') ? qtyText.split('.')[1].length : 0
+      if (market === 'US' && decimalDigits > 4) {
+        toast('美股碎股最多支持到小数点后4位', 'error')
+        return
+      }
+      if ((market === 'CN' || market === 'HK') && !Number.isInteger(parsedQuantity)) {
+        toast('A股和港股持仓数量仅支持整数；仅美股支持碎股', 'error')
+        return
+      }
+
+      const parsedCostPrice = parseFloat(positionForm.cost_price)
+      if (!Number.isFinite(parsedCostPrice) || parsedCostPrice <= 0) {
+        toast('请输入有效的成本价', 'error')
+        return
+      }
+
       const payload = {
         account_id: positionForm.account_id,
         stock_id: stockId,
-        cost_price: parseFloat(positionForm.cost_price),
-        quantity: parseInt(positionForm.quantity),
+        cost_price: parsedCostPrice,
+        quantity: parsedQuantity,
         invested_amount: positionForm.invested_amount ? parseFloat(positionForm.invested_amount) : null,
         trading_style: positionForm.trading_style,  // 空字符串表示清空
       }
+      if (payload.invested_amount != null && !Number.isFinite(payload.invested_amount)) {
+        toast('投入资金格式不正确', 'error')
+        return
+      }
       if (editPositionId) {
-        await fetchAPI(`/positions/${editPositionId}`, { method: 'PUT', body: JSON.stringify(payload) })
+        if (positionEditMode === 'overwrite') {
+          await fetchAPI(`/positions/${editPositionId}/trades`, {
+            method: 'POST',
+            body: JSON.stringify({
+              action: 'overwrite',
+              quantity: parsedQuantity,
+              price: parsedCostPrice,
+              amount: payload.invested_amount,
+              trade_date: positionTradeDate,
+            })
+          })
+        } else {
+          await fetchAPI(`/positions/${editPositionId}/trades`, {
+            method: 'POST',
+            body: JSON.stringify({
+              action: positionEditMode,
+              quantity: parsedQuantity,
+              price: parsedCostPrice,
+              amount: payload.invested_amount,
+              trade_date: positionTradeDate,
+            })
+          })
+        }
       } else {
         await fetchAPI('/positions', { method: 'POST', body: JSON.stringify(payload) })
       }
       setPositionDialogOpen(false)
       loadPortfolio()
-      toast(editPositionId ? '持仓已更新' : '持仓已添加', 'success')
+      toast(editPositionId ? '持仓交易已记录' : '持仓已添加', 'success')
     } catch (e) {
       toast(e instanceof Error ? e.message : '保存持仓失败', 'error')
     }
@@ -1473,6 +1740,7 @@ export default function StocksPage() {
   }
 
   const marketLabel = (m: string) => m === 'CN' ? 'A股' : m === 'HK' ? '港股' : m === 'US' ? '美股' : m === 'FUND' ? '基金' : m
+  const agentLabel = (agentName: string) => agents.find(a => a.name === agentName)?.display_name || agentName
 
   // 市场徽章样式和短标签
   const marketBadge = (m: string) => {
@@ -1487,6 +1755,14 @@ export default function StocksPage() {
     // 最多显示4位小数，去除末尾的0
     const formatted = value.toFixed(4).replace(/\.?0+$/, '')
     return formatted
+  }
+
+  const formatQuantity = (quantity: number, market: string) => {
+    const normalizedMarket = String(market || '').toUpperCase()
+    if (normalizedMarket === 'US') {
+      return Number(quantity).toFixed(4).replace(/\.?0+$/, '')
+    }
+    return Number(quantity).toFixed(0)
   }
 
   // 获取股票的行情信息
@@ -2455,7 +2731,7 @@ export default function StocksPage() {
                                       return <td key={`${pos.id}-cost_price`} className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{formatPrice(pos.cost_price)}</td>
                                     }
                                     if (colKey === 'quantity') {
-                                      return <td key={`${pos.id}-quantity`} className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{pos.quantity}</td>
+                                      return <td key={`${pos.id}-quantity`} className="px-4 py-2.5 text-right font-mono text-[12px] text-muted-foreground">{formatQuantity(pos.quantity, pos.market)}</td>
                                     }
                                     if (colKey === 'market_value') {
                                       return (
@@ -2535,8 +2811,7 @@ export default function StocksPage() {
                                         initialEnabled={getPriceAlertSummary(pos.symbol, pos.market).enabled}
                                         onChanged={loadPriceAlertSummaries}
                                       />
-                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('report', pos.symbol, pos.market, pos.name)} title="相关报告"><FileText className="w-3 h-3" /></Button>
-                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('news', pos.symbol, pos.market, pos.name)} title="相关资讯"><Newspaper className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelModal(pos.symbol, pos.market, pos.name)} title="情报"><FileText className="w-3 h-3" /></Button>
                                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)}><Pencil className="w-3 h-3" /></Button>
                                       <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)}><Trash2 className="w-3 h-3" /></Button>
                                     </div>
@@ -2637,7 +2912,7 @@ export default function StocksPage() {
                               <div className="flex items-center justify-between text-[11px]">
                                 <div className="flex items-center gap-3">
                                   <span className="text-muted-foreground">成本 <span className="font-mono text-foreground">{formatPrice(pos.cost_price)}</span></span>
-                                  <span className="text-muted-foreground">数量 <span className="font-mono text-foreground">{pos.quantity}</span></span>
+                                  <span className="text-muted-foreground">数量 <span className="font-mono text-foreground">{formatQuantity(pos.quantity, pos.market)}</span></span>
                                   <span className="text-muted-foreground">今日 <span className={`font-mono ${(pos.day_pnl || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>{pos.day_pnl != null ? `${pos.day_pnl >= 0 ? '+' : ''}${formatMoney(pos.day_pnl)}` : '—'}</span></span>
                                 </div>
                                 <div className={`font-mono ${pnlColor}`}>
@@ -2686,8 +2961,7 @@ export default function StocksPage() {
                                     initialEnabled={getPriceAlertSummary(pos.symbol, pos.market).enabled}
                                     onChanged={loadPriceAlertSummaries}
                                   />
-                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('report', pos.symbol, pos.market, pos.name)} title="相关报告"><FileText className="w-3 h-3" /></Button>
-                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('news', pos.symbol, pos.market, pos.name)} title="相关资讯"><Newspaper className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelModal(pos.symbol, pos.market, pos.name)} title="情报"><FileText className="w-3 h-3" /></Button>
                                   <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)}><Pencil className="w-3 h-3" /></Button>
                                   <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)}><Trash2 className="w-3 h-3" /></Button>
                                 </div>
@@ -2843,7 +3117,7 @@ export default function StocksPage() {
                           className={`group hover:bg-accent/30 transition-colors cursor-pointer ${i > 0 ? 'border-t border-border/20' : ''} ${draggingWatchStockId === stock.id ? 'opacity-60' : ''}`}
                           onClick={() => {
                             if (isSuppressCardClick()) return
-                            setAgentDialogStock(stock)
+                            openStockDetail(stock.symbol, stock.market, stock.name, false)
                           }}
                         >
                           <td className="px-3 py-2.5">
@@ -2872,7 +3146,14 @@ export default function StocksPage() {
                             {quote?.change_pct != null ? `${quote.change_pct >= 0 ? '+' : ''}${quote.change_pct.toFixed(2)}%` : '--'}
                           </td>
                           <td className="px-3 py-2.5 hidden md:table-cell">
-                            <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              className="flex items-center gap-1 hover:opacity-80 transition-opacity"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setAgentDialogStock(stock)
+                              }}
+                            >
                               {stock.agents && stock.agents.length > 0 ? (
                                 <Badge variant="secondary" className="text-[10px]">{stock.agents.length} Agent</Badge>
                               ) : (
@@ -2883,7 +3164,7 @@ export default function StocksPage() {
                                   <span className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
                                 </span>
                               )}
-                            </div>
+                            </button>
                           </td>
                           <td className="px-3 py-2.5">
                             <div className="flex items-center justify-center gap-0.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
@@ -2902,11 +3183,8 @@ export default function StocksPage() {
                                 initialEnabled={getPriceAlertSummary(stock.symbol, stock.market).enabled}
                                 onChanged={loadPriceAlertSummaries}
                               />
-                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('report', stock.symbol, stock.market, stock.name)} title="相关报告">
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelModal(stock.symbol, stock.market, stock.name)} title="情报">
                                 <FileText className="w-3.5 h-3.5" />
-                              </Button>
-                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openIntelCenter('news', stock.symbol, stock.market, stock.name)} title="相关资讯">
-                                <Newspaper className="w-3.5 h-3.5" />
                               </Button>
                               <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => setRemoveWatchStock(stock)} title="删除">
                                 <X className="w-3.5 h-3.5" />
@@ -2975,7 +3253,7 @@ export default function StocksPage() {
                     className={`group rounded-xl border border-border/40 bg-background/30 hover:bg-accent/20 transition-colors p-3 cursor-pointer ${draggingWatchStockId === stock.id ? 'opacity-60' : ''}`}
                     onClick={() => {
                       if (isSuppressCardClick()) return
-                      setAgentDialogStock(stock)
+                      openStockDetail(stock.symbol, stock.market, stock.name, false)
                     }}
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -3066,17 +3344,8 @@ export default function StocksPage() {
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
-                          onClick={() => openIntelCenter('news', stock.symbol, stock.market, stock.name)}
-                          title="相关资讯"
-                        >
-                          <Newspaper className="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => openIntelCenter('report', stock.symbol, stock.market, stock.name)}
-                          title="相关报告"
+                          onClick={() => openIntelModal(stock.symbol, stock.market, stock.name)}
+                          title="情报"
                         >
                           <FileText className="w-3.5 h-3.5" />
                         </Button>
@@ -3125,6 +3394,259 @@ export default function StocksPage() {
         fundCode={fundOverviewSymbol}
         fundName={fundOverviewName}
       />
+
+      <Dialog
+        open={intelModalOpen}
+        onOpenChange={(open) => {
+          setIntelModalOpen(open)
+          if (!open) {
+            setIntelReportItems([])
+            setIntelNewsItems([])
+            setIntelReportTotal(0)
+            setIntelNewsTotal(0)
+            setIntelSelectedReportId(null)
+            setIntelSelectedNewsIdx(null)
+            setIntelSearchQuery('')
+          }
+        }}
+      >
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>情报</DialogTitle>
+            <DialogDescription>
+              {intelName || intelSymbol} · {marketLabel(intelMarket)}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 mt-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button type="button" variant={intelTab === 'report' ? 'default' : 'secondary'} onClick={() => { setIntelTab('report'); setIntelSearchQuery(''); setIntelReportPage(1) }}>
+                <FileText className="w-4 h-4" /> 报告
+              </Button>
+              <Button type="button" variant={intelTab === 'news' ? 'default' : 'secondary'} onClick={() => { setIntelTab('news'); setIntelSearchQuery(''); setIntelNewsPage(1) }}>
+                <Newspaper className="w-4 h-4" /> 资讯
+              </Button>
+              <div className="flex items-center gap-0.5 ml-1 rounded-md border border-border/50 p-0.5">
+                <button
+                  type="button"
+                  title="目录视图"
+                  onClick={() => setIntelViewMode('catalog')}
+                  className={`p-1.5 rounded transition-colors ${intelViewMode === 'catalog' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'}`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title="列表视图"
+                  onClick={() => setIntelViewMode('list')}
+                  className={`p-1.5 rounded transition-colors ${intelViewMode === 'list' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'}`}
+                >
+                  <List className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="relative ml-1 flex-1 min-w-[160px]">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  value={intelSearchQuery}
+                  onChange={e => {
+                    setIntelSearchQuery(e.target.value)
+                    if (intelTab === 'report') setIntelReportPage(1)
+                    else setIntelNewsPage(1)
+                  }}
+                  placeholder={intelTab === 'report' ? '搜索报告标题/内容…' : '搜索资讯标题…'}
+                  className="w-full pl-7 pr-3 h-9 rounded-md border border-input bg-background text-[13px] placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+            </div>
+
+            {intelTab === 'report' ? (
+              intelViewMode === 'catalog' ? (
+                // 目录视图：左列表 + 右详情
+                <div className="grid grid-cols-1 md:grid-cols-[3fr_7fr] gap-3 min-h-[360px]">
+                  <div className="rounded-lg border border-border/50 p-2 max-h-[420px] overflow-auto space-y-2">
+                    {intelLoading ? (
+                      <div className="text-[12px] text-muted-foreground p-2">加载中...</div>
+                    ) : intelReportItems.length === 0 ? (
+                      <div className="text-[12px] text-muted-foreground p-2">暂无报告</div>
+                    ) : intelReportItems.map(item => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setIntelSelectedReportId(item.id)}
+                        className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${intelSelectedReportId === item.id ? 'border-primary bg-primary/5' : 'border-border/40 hover:bg-accent/30'}`}
+                      >
+                        <div className="text-[13px] font-medium text-foreground line-clamp-2">{item.title || '未命名报告'}</div>
+                        <div className="text-[11px] text-muted-foreground mt-1">{item.analysis_date} · {agentLabel(item.agent_name)}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border border-border/50 p-3 max-h-[420px] overflow-auto">
+                    {(() => {
+                      const selected = intelReportItems.find(x => x.id === intelSelectedReportId) || null
+                      if (!selected) return <div className="text-[12px] text-muted-foreground">请选择报告卡片查看内容</div>
+                      return (
+                        <>
+                          <div className="text-[14px] font-semibold mb-1">{selected.title || '未命名报告'}</div>
+                          <div className="text-[11px] text-muted-foreground mb-3">{selected.analysis_date} · {agentLabel(selected.agent_name)}</div>
+                          <div className="prose prose-sm max-w-none prose-headings:my-2 prose-p:my-1">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{sanitizeReportContent(selected.content)}</ReactMarkdown>
+                          </div>
+                        </>
+                      )
+                    })()}
+                  </div>
+                </div>
+              ) : (
+                // 列表视图：单列展开
+                <div className="rounded-lg border border-border/50 p-2 max-h-[480px] overflow-auto space-y-3 min-h-[360px]">
+                  {intelLoading ? (
+                    <div className="text-[12px] text-muted-foreground p-2">加载中...</div>
+                  ) : intelReportItems.length === 0 ? (
+                    <div className="text-[12px] text-muted-foreground p-2">暂无报告</div>
+                  ) : intelReportItems.map(item => (
+                    <div key={item.id} className="rounded-lg border border-border/40 p-3">
+                      <div className="text-[14px] font-semibold mb-0.5">{item.title || '未命名报告'}</div>
+                      <div className="text-[11px] text-muted-foreground mb-3">{item.analysis_date} · {agentLabel(item.agent_name)}</div>
+                      <div className="prose prose-sm max-w-none prose-headings:my-2 prose-p:my-1">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{sanitizeReportContent(item.content)}</ReactMarkdown>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : (
+              intelViewMode === 'catalog' ? (
+                // 目录视图：左列表 + 右详情
+                <div className="grid grid-cols-1 md:grid-cols-[3fr_7fr] gap-3 min-h-[360px]">
+                  <div className="rounded-lg border border-border/50 p-2 max-h-[420px] overflow-auto space-y-2">
+                    {intelLoading ? (
+                      <div className="text-[12px] text-muted-foreground p-2">加载中...</div>
+                    ) : intelNewsItems.length === 0 ? (
+                      <div className="text-[12px] text-muted-foreground p-2">暂无资讯</div>
+                    ) : intelNewsItems.map((item, idx) => (
+                      <button
+                        key={`${item.external_id || item.title}-${idx}`}
+                        type="button"
+                        onClick={() => setIntelSelectedNewsIdx(idx)}
+                        className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${intelSelectedNewsIdx === idx ? 'border-primary bg-primary/5' : 'border-border/40 hover:bg-accent/30'}`}
+                      >
+                        <div className="text-[13px] font-medium text-foreground line-clamp-2">{item.title}</div>
+                        <div className="text-[11px] text-muted-foreground mt-1">{item.source_label || item.source || '资讯'}</div>
+                        <div className="text-[11px] text-muted-foreground">{item.publish_time || '--'}</div>
+                        {item.url && (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={e => { e.stopPropagation(); window.open(item.url, '_blank', 'noopener,noreferrer') }}
+                            onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); window.open(item.url, '_blank', 'noopener,noreferrer') } }}
+                            className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+                          >
+                            <ArrowUpRight className="w-3 h-3" />原文
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border border-border/50 p-3 max-h-[420px] overflow-auto">
+                    {(() => {
+                      const selected = intelSelectedNewsIdx !== null ? intelNewsItems[intelSelectedNewsIdx] ?? null : null
+                      if (!selected) return <div className="text-[12px] text-muted-foreground">请选择左侧资讯查看内容</div>
+                      return (
+                        <>
+                          <div className="flex items-start justify-between gap-3 mb-3">
+                            <div>
+                              <div className="text-[14px] font-semibold">{selected.title}</div>
+                              <div className="text-[11px] text-muted-foreground mt-1">{selected.source_label || selected.source || '资讯'} · {selected.publish_time || '--'}</div>
+                            </div>
+                            {selected.url && (
+                              <button
+                                type="button"
+                                onClick={() => window.open(selected.url, '_blank', 'noopener,noreferrer')}
+                                className="shrink-0 inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                              >
+                                <ArrowUpRight className="w-3.5 h-3.5" />查看原文
+                              </button>
+                            )}
+                          </div>
+                          {selected.content ? (
+                            <div className="text-[13px] text-foreground/90 leading-relaxed whitespace-pre-wrap">{selected.content}</div>
+                          ) : (
+                            <div className="text-[12px] text-muted-foreground">暂无内容摘要，请点击「查看原文」按钮查看原文</div>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
+                </div>
+              ) : (
+                // 列表视图：单列展开
+                <div className="rounded-lg border border-border/50 p-2 max-h-[480px] overflow-auto space-y-3 min-h-[360px]">
+                  {intelLoading ? (
+                    <div className="text-[12px] text-muted-foreground p-2">加载中...</div>
+                  ) : intelNewsItems.length === 0 ? (
+                    <div className="text-[12px] text-muted-foreground p-2">暂无资讯</div>
+                  ) : intelNewsItems.map((item, idx) => (
+                    <div key={`${item.external_id || item.title}-${idx}`} className="rounded-lg border border-border/40 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-[14px] font-semibold">{item.title}</div>
+                          <div className="text-[11px] text-muted-foreground mt-0.5">{item.source_label || item.source || '资讯'} · {item.publish_time || '--'}</div>
+                        </div>
+                        {item.url && (
+                          <button
+                            type="button"
+                            onClick={() => window.open(item.url, '_blank', 'noopener,noreferrer')}
+                            className="shrink-0 inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+                          >
+                            <ArrowUpRight className="w-3 h-3" />原文
+                          </button>
+                        )}
+                      </div>
+                      {item.content && (
+                        <div className="mt-2 text-[13px] text-foreground/90 leading-relaxed whitespace-pre-wrap">{item.content}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+
+            <div className="flex items-center justify-between text-[12px] text-muted-foreground">
+              {intelTab === 'report' ? (
+                <span>第 {intelReportPage} 页 / 共 {Math.max(1, Math.ceil(intelReportTotal / intelPageSize))} 页</span>
+              ) : (
+                <span>第 {intelNewsPage} 页 / 共 {Math.max(1, Math.ceil(intelNewsTotal / intelPageSize))} 页</span>
+              )}
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-8 px-2"
+                  disabled={intelLoading || (intelTab === 'report' ? intelReportPage <= 1 : intelNewsPage <= 1)}
+                  onClick={() => {
+                    if (intelTab === 'report') setIntelReportPage(p => Math.max(1, p - 1))
+                    else setIntelNewsPage(p => Math.max(1, p - 1))
+                  }}
+                >
+                  上一页
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-8 px-2"
+                  disabled={intelLoading || (intelTab === 'report' ? intelReportPage * intelPageSize >= intelReportTotal : intelNewsPage * intelPageSize >= intelNewsTotal)}
+                  onClick={() => {
+                    if (intelTab === 'report') setIntelReportPage(p => p + 1)
+                    else setIntelNewsPage(p => p + 1)
+                  }}
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Remove Watchlist Dialog */}
       <Dialog open={!!removeWatchStock} onOpenChange={(open) => { if (!open) setRemoveWatchStock(null) }}>
@@ -3250,6 +3772,10 @@ export default function StocksPage() {
             setPositionSearchResults([])
             setShowPositionDropdown(false)
             setPositionSearchMarket('')
+            setPositionTrades([])
+            setPositionTradesTotal(0)
+            setPositionTradesPage(1)
+            setPositionEditMode('overwrite')
           }
         }}
       >
@@ -3262,12 +3788,22 @@ export default function StocksPage() {
           </DialogHeader>
           <div className="space-y-4 mt-2">
             {editPositionId ? (
-              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent/30">
-                <span className={`text-[9px] px-1.5 py-0.5 rounded ${marketBadge(positionForm.stock_market).style}`}>
-                  {marketBadge(positionForm.stock_market).label}
-                </span>
-                <span className="font-mono text-[12px] text-muted-foreground">{positionForm.stock_symbol}</span>
-                <span className="text-[13px] text-foreground">{positionForm.stock_name}</span>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent/30">
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${marketBadge(positionForm.stock_market).style}`}>
+                    {marketBadge(positionForm.stock_market).label}
+                  </span>
+                  <span className="font-mono text-[12px] text-muted-foreground">{positionForm.stock_symbol}</span>
+                  <span className="text-[13px] text-foreground">{positionForm.stock_name}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button type="button" variant={positionEditMode === 'add' ? 'default' : 'secondary'} onClick={() => setPositionEditMode('add')}>加仓（买入）</Button>
+                  <Button type="button" variant={positionEditMode === 'reduce' ? 'default' : 'secondary'} onClick={() => setPositionEditMode('reduce')}>减仓（卖出）</Button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button type="button" variant={positionEditMode === 'overwrite' ? 'default' : 'secondary'} onClick={() => setPositionEditMode('overwrite')}>覆盖当前持仓</Button>
+                  <Input type="date" value={positionTradeDate} onChange={e => setPositionTradeDate(e.target.value)} className="font-mono" />
+                </div>
               </div>
             ) : (
               <div>
@@ -3349,7 +3885,7 @@ export default function StocksPage() {
             )}
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label>成本价</Label>
+                <Label>{editPositionId ? '本次成交价' : '成本价'}</Label>
                 <Input
                   value={positionForm.cost_price}
                   onChange={e => setPositionForm({ ...positionForm, cost_price: e.target.value })}
@@ -3359,13 +3895,13 @@ export default function StocksPage() {
                 />
               </div>
               <div>
-                <Label>持仓数量</Label>
+                <Label>{editPositionId && positionEditMode !== 'overwrite' ? '本次数量' : '持仓数量'}</Label>
                 <Input
                   value={positionForm.quantity}
                   onChange={e => setPositionForm({ ...positionForm, quantity: e.target.value })}
                   placeholder="0"
                   className="font-mono"
-                  inputMode="numeric"
+                  inputMode={positionForm.stock_market === 'US' ? 'decimal' : 'numeric'}
                 />
               </div>
             </div>
@@ -3398,13 +3934,64 @@ export default function StocksPage() {
                 </Select>
               </div>
             </div>
+            {editPositionId && (
+              <div className="rounded-lg border border-border/50 p-3">
+                <div className="text-[12px] text-muted-foreground mb-2">交易记录</div>
+                {positionTradesLoading ? (
+                  <div className="text-[12px] text-muted-foreground">加载中...</div>
+                ) : positionTrades.length === 0 ? (
+                  <div className="text-[12px] text-muted-foreground">暂无记录</div>
+                ) : (
+                  <>
+                    <div className="max-h-40 overflow-auto space-y-1.5">
+                      {positionTrades.map(item => (
+                        <div key={item.id} className="text-[12px] flex items-center justify-between gap-2 rounded bg-accent/20 px-2 py-1.5">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-mono text-muted-foreground">{item.trade_date || '--'}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] ${item.action === 'add' ? 'bg-rose-500/10 text-rose-500' : item.action === 'reduce' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-sky-500/10 text-sky-500'}`}>
+                              {item.action === 'add' ? '加仓' : item.action === 'reduce' ? '减仓' : item.action === 'overwrite' ? '覆盖' : '建仓'}
+                            </span>
+                            <span className="font-mono">{formatQuantity(item.quantity, positionForm.stock_market)}</span>
+                            <span className="font-mono text-muted-foreground">@ {formatPrice(item.price)}</span>
+                          </div>
+                          <div className="font-mono text-muted-foreground text-[11px]">{formatQuantity(item.before_quantity, positionForm.stock_market)} → {formatQuantity(item.after_quantity, positionForm.stock_market)}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
+                      <span>第 {positionTradesPage} 页 / 共 {Math.max(1, Math.ceil(positionTradesTotal / positionTradesPageSize))} 页</span>
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="h-7 px-2 text-[11px]"
+                          disabled={positionTradesPage <= 1 || positionTradesLoading || !editPositionId}
+                          onClick={() => editPositionId && loadPositionTrades(editPositionId, positionTradesPage - 1)}
+                        >
+                          上一页
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="h-7 px-2 text-[11px]"
+                          disabled={positionTradesPage * positionTradesPageSize >= positionTradesTotal || positionTradesLoading || !editPositionId}
+                          onClick={() => editPositionId && loadPositionTrades(editPositionId, positionTradesPage + 1)}
+                        >
+                          下一页
+                        </Button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={() => setPositionDialogOpen(false)}>取消</Button>
               <Button
                 onClick={handlePositionSubmit}
                 disabled={!positionForm.cost_price || !positionForm.quantity || (!editPositionId && !positionForm.stock_id && !positionForm.stock_symbol)}
               >
-                {editPositionId ? '保存' : '添加'}
+                {editPositionId ? (positionEditMode === 'add' ? '记录加仓' : positionEditMode === 'reduce' ? '记录减仓' : '覆盖持仓') : '添加'}
               </Button>
             </div>
           </div>

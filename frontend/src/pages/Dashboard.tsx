@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   TrendingUp,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
   Moon,
 } from 'lucide-react'
 import { dashboardApi, discoveryApi } from '@panwatch/api'
+import { sanitizeReportContent } from '@/lib/report-content'
 import { useLocalStorage } from '@/lib/utils'
 import { useRefreshReceiver, useAutoRefreshProgress } from '@/hooks/use-global-refresh'
 import { Button } from '@panwatch/base-ui/components/ui/button'
@@ -123,6 +125,37 @@ interface MonitorStock {
   trading_style: string | null
   kline?: Record<string, any> | null
   suggestion?: Record<string, any> | null
+}
+
+function toFiniteNumberOrNull(value: unknown): number | null {
+  if (value == null || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function normalizeMonitorStock(item: any): MonitorStock {
+  return {
+    ...item,
+    symbol: String(item?.symbol || ''),
+    name: String(item?.name || ''),
+    market: String(item?.market || 'CN').toUpperCase(),
+    current_price: toFiniteNumberOrNull(item?.current_price) ?? 0,
+    change_pct: toFiniteNumberOrNull(item?.change_pct) ?? 0,
+    open_price: toFiniteNumberOrNull(item?.open_price),
+    high_price: toFiniteNumberOrNull(item?.high_price),
+    low_price: toFiniteNumberOrNull(item?.low_price),
+    volume: toFiniteNumberOrNull(item?.volume),
+    turnover: toFiniteNumberOrNull(item?.turnover),
+    cost_price: toFiniteNumberOrNull(item?.cost_price),
+    pnl_pct: toFiniteNumberOrNull(item?.pnl_pct),
+    alert_type: item?.alert_type ? String(item.alert_type) : null,
+    has_position: Boolean(item?.has_position),
+    trading_style: item?.trading_style ? String(item.trading_style) : null,
+  }
+}
+
+function ensureArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : []
 }
 
 interface Stock {
@@ -380,7 +413,7 @@ export default function DashboardPage() {
     setIndicesLoading(true)
     try {
       const data = await dashboardApi.indices()
-      setIndices(data)
+      setIndices(ensureArray<MarketIndex>(data))
     } catch (e) {
       console.error('获取指数失败:', e)
     } finally {
@@ -391,7 +424,7 @@ export default function DashboardPage() {
   const loadMarketStatus = async () => {
     try {
       const data = await dashboardApi.marketStatus()
-      setMarketStatus(data)
+      setMarketStatus(ensureArray<MarketStatus>(data))
     } catch (e) {
       console.error('获取市场状态失败:', e)
     }
@@ -413,7 +446,7 @@ export default function DashboardPage() {
   const loadWatchlist = async () => {
     try {
       const stocksData = await dashboardApi.watchlist()
-      setStocks(stocksData)
+      setStocks(ensureArray<Stock>(stocksData))
     } catch (e) {
       console.error('获取自选股失败:', e)
     }
@@ -533,9 +566,12 @@ export default function DashboardPage() {
         dashboardApi.history({ agent_name: 'premarket_outlook', limit: 1 }),
         dashboardApi.history({ agent_name: 'news_digest', kind: 'all', limit: 1 }),
       ])
-      setDailyReport(dailyData.length > 0 ? dailyData[0] : null)
-      setPremarketOutlook(premarketData.length > 0 ? premarketData[0] : null)
-      setNewsDigest(newsData.length > 0 ? newsData[0] : null)
+      const safeDaily = ensureArray<AnalysisRecord>(dailyData)
+      const safePremarket = ensureArray<AnalysisRecord>(premarketData)
+      const safeNews = ensureArray<AnalysisRecord>(newsData)
+      setDailyReport(safeDaily.length > 0 ? safeDaily[0] : null)
+      setPremarketOutlook(safePremarket.length > 0 ? safePremarket[0] : null)
+      setNewsDigest(safeNews.length > 0 ? safeNews[0] : null)
     } catch (e) {
       console.error('获取 AI 洞察失败:', e)
     } finally {
@@ -575,7 +611,7 @@ export default function DashboardPage() {
           mode: boardsMode,
           limit: 12,
         })
-        const normalized = items || []
+        const normalized = ensureArray<HotBoardItem>(items)
         setHotBoards(normalized)
         discoveryCacheRef.current.boards[cacheKey] = { ts: now, data: normalized }
       } else {
@@ -585,7 +621,7 @@ export default function DashboardPage() {
             discoveryApi.listHotStocks({ market: discoverMarket, mode: 'gainers', limit: 20 }),
           ])
           const map = new Map<string, HotStockItem>()
-          for (const item of [...(turnoverItems || []), ...(gainerItems || [])]) {
+          for (const item of [...ensureArray<HotStockItem>(turnoverItems), ...ensureArray<HotStockItem>(gainerItems)]) {
             map.set(item.symbol, item)
           }
           const normalized = Array.from(map.values())
@@ -597,7 +633,7 @@ export default function DashboardPage() {
             mode: stocksMode,
             limit: 20,
           })
-          const normalized = items || []
+          const normalized = ensureArray<HotStockItem>(items)
           setHotStocks(normalized)
           discoveryCacheRef.current.stocks[cacheKey] = { ts: now, data: normalized }
         }
@@ -619,7 +655,7 @@ export default function DashboardPage() {
     setBoardDialogOpen(true)
     try {
       const items = await discoveryApi.listBoardStocks(b.code, { mode: 'gainers', limit: 20 })
-      setBoardStocks(items || [])
+      setBoardStocks(ensureArray<HotStockItem>(items))
     } catch {
       setBoardStocks([])
     }
@@ -634,7 +670,10 @@ export default function DashboardPage() {
       // Phase 1: always get fast scan first (no AI), render immediately.
       const result = await dashboardApi.intradayScan()
       if (reqId !== scanRequestRef.current) return
-      setMonitorStocks(result.stocks || [])
+      const normalized = Array.isArray(result?.stocks)
+        ? result.stocks.map(normalizeMonitorStock).filter((s) => !!s.symbol)
+        : []
+      setMonitorStocks(normalized)
       setLastRefreshTime(new Date())
       setLastScanTime(new Date())
     } catch (e) {
@@ -648,7 +687,9 @@ export default function DashboardPage() {
     try {
       const aiResult = await dashboardApi.intradayScan({ analyze: true })
       if (reqId !== scanRequestRef.current) return
-      const aiStocks = aiResult.stocks || []
+      const aiStocks = Array.isArray(aiResult?.stocks)
+        ? aiResult.stocks.map(normalizeMonitorStock).filter((s) => !!s.symbol)
+        : []
       setMonitorStocks(prev => {
         if (!prev || prev.length === 0) return aiStocks
         const aiMap = new Map(aiStocks.map(s => [`${s.market}:${s.symbol}`, s] as const))
@@ -684,18 +725,20 @@ export default function DashboardPage() {
   useRefreshReceiver(handleRefresh)
 
   const formatMoney = (value: number) => {
-    if (Math.abs(value) >= 10000) {
-      return `${(value / 10000).toFixed(2)}万`
+    const n = toFiniteNumberOrNull(value) ?? 0
+    if (Math.abs(n) >= 10000) {
+      return `${(n / 10000).toFixed(2)}万`
     }
-    return value.toFixed(2)
+    return n.toFixed(2)
   }
 
-  const formatIndexPrice = (value: number | null) => {
-    if (value === null) return '--'
-    if (value >= 10000) {
-      return value.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  const formatIndexPrice = (value: number | string | null | undefined) => {
+    const n = toFiniteNumberOrNull(value)
+    if (n === null) return '--'
+    if (n >= 10000) {
+      return n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
     }
-    return value.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    return n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   }
 
   const marketBadge = (m: string) => {
@@ -994,6 +1037,7 @@ export default function DashboardPage() {
         {/* Market status pills */}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {marketStatus.map(m => {
+            const sessions = Array.isArray(m.sessions) ? m.sessions : []
             const statusColors: Record<string, string> = {
               trading: 'bg-emerald-500',
               pre_market: 'bg-amber-500',
@@ -1005,7 +1049,7 @@ export default function DashboardPage() {
               <div
                 key={m.code}
                 className="px-2.5 py-1 rounded-full bg-background/70 border border-border/50 text-[11px] text-muted-foreground flex items-center gap-1.5"
-                title={`${m.sessions.join(', ')} (${m.local_time})`}
+                title={`${sessions.join(', ')} (${m.local_time || '--'})`}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${statusColors[m.status] || 'bg-slate-400'}`} />
                 <span className="text-foreground/90">{m.name}</span>
@@ -1242,7 +1286,7 @@ export default function DashboardPage() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {hotBoards.slice(0, 6).map(b => {
-                  const pct = b.change_pct ?? 0
+                  const pct = toFiniteNumberOrNull(b.change_pct) ?? 0
                   const color = pct > 0 ? 'text-rose-500' : pct < 0 ? 'text-emerald-500' : 'text-muted-foreground'
                   return (
                     <button
@@ -1273,7 +1317,8 @@ export default function DashboardPage() {
                 )}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {visibleHotStocks.slice(0, 6).map(s => {
-                  const pct = s.change_pct ?? 0
+                  const pct = toFiniteNumberOrNull(s.change_pct) ?? 0
+                  const price = toFiniteNumberOrNull(s.price)
                   const color = pct > 0 ? 'text-rose-500' : pct < 0 ? 'text-emerald-500' : 'text-muted-foreground'
                   return (
                     <div
@@ -1292,7 +1337,7 @@ export default function DashboardPage() {
                         )}
                       </div>
                       <div className="text-right">
-                        <div className="text-[12px] font-mono text-foreground">{s.price != null ? s.price.toFixed(2) : '--'}</div>
+                        <div className="text-[12px] font-mono text-foreground">{price != null ? price.toFixed(2) : '--'}</div>
                         <div className={`text-[11px] font-mono ${color}`}>{pct >= 0 ? '+' : ''}{pct.toFixed(2)}%</div>
                       </div>
                     </div>
@@ -1324,8 +1369,10 @@ export default function DashboardPage() {
             ))
           ) : (
             indices.map(idx => {
-              const isUp = idx.change_pct !== null && idx.change_pct > 0
-              const isDown = idx.change_pct !== null && idx.change_pct < 0
+              const pct = toFiniteNumberOrNull(idx.change_pct)
+              const amt = toFiniteNumberOrNull(idx.change_amount)
+              const isUp = pct !== null && pct > 0
+              const isDown = pct !== null && pct < 0
               const changeColor = isUp ? 'text-rose-500' : isDown ? 'text-emerald-500' : 'text-muted-foreground'
               const bgColor = isUp ? 'bg-rose-500/5' : isDown ? 'bg-emerald-500/5' : 'bg-accent/30'
 
@@ -1341,11 +1388,11 @@ export default function DashboardPage() {
                     {formatIndexPrice(idx.current_price)}
                   </div>
                   <div className={`text-[12px] font-mono ${changeColor}`}>
-                    {idx.change_pct !== null ? (
+                    {pct !== null ? (
                       <>
-                        {isUp ? '+' : ''}{idx.change_pct.toFixed(2)}%
+                        {isUp ? '+' : ''}{pct.toFixed(2)}%
                         <span className="ml-1.5 opacity-60">
-                          {isUp ? '+' : ''}{idx.change_amount?.toFixed(2)}
+                          {isUp ? '+' : ''}{amt !== null ? amt.toFixed(2) : '--'}
                         </span>
                       </>
                     ) : (
@@ -1371,7 +1418,8 @@ export default function DashboardPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-[60vh] overflow-y-auto scrollbar">
               {boardStocks.map(s => {
-                const pct = s.change_pct ?? 0
+                const pct = toFiniteNumberOrNull(s.change_pct) ?? 0
+                const price = toFiniteNumberOrNull(s.price)
                 const color = pct > 0 ? 'text-rose-500' : pct < 0 ? 'text-emerald-500' : 'text-muted-foreground'
                 return (
                   <div
@@ -1400,7 +1448,7 @@ export default function DashboardPage() {
                         详情
                       </Button>
                       <div className="text-right">
-                      <div className="text-[12px] font-mono text-foreground">{s.price != null ? s.price.toFixed(2) : '--'}</div>
+                      <div className="text-[12px] font-mono text-foreground">{price != null ? price.toFixed(2) : '--'}</div>
                       <div className={`text-[11px] font-mono ${color}`}>{pct >= 0 ? '+' : ''}{pct.toFixed(2)}%</div>
                       </div>
                     </div>
@@ -1496,9 +1544,9 @@ export default function DashboardPage() {
                       </div>
                     </div>
                     <div className="mt-2 flex items-center justify-between text-[12px]">
-                      <span className="font-mono text-foreground">{s.current_price?.toFixed(2) || '--'}</span>
-                      <span className={`font-mono ${s.change_pct > 0 ? 'text-rose-500' : s.change_pct < 0 ? 'text-emerald-500' : 'text-muted-foreground'}`}>
-                        {s.change_pct >= 0 ? '+' : ''}{(s.change_pct || 0).toFixed(2)}%
+                      <span className="font-mono text-foreground">{Number.isFinite(Number(s.current_price)) ? Number(s.current_price).toFixed(2) : '--'}</span>
+                      <span className={`font-mono ${Number(s.change_pct) > 0 ? 'text-rose-500' : Number(s.change_pct) < 0 ? 'text-emerald-500' : 'text-muted-foreground'}`}>
+                        {Number(s.change_pct) >= 0 ? '+' : ''}{(Number.isFinite(Number(s.change_pct)) ? Number(s.change_pct) : 0).toFixed(2)}%
                       </span>
                     </div>
                     {s.suggestion && (
@@ -1566,7 +1614,7 @@ export default function DashboardPage() {
           </DialogHeader>
           {previewInsight && (
             <div className="prose prose-sm dark:prose-invert max-w-none max-h-[60vh] overflow-y-auto">
-              <ReactMarkdown>{previewInsight.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{sanitizeReportContent(previewInsight.content)}</ReactMarkdown>
             </div>
           )}
           <div className="flex justify-end">
