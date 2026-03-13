@@ -21,6 +21,28 @@ ACTION_ALIASES = {
 
 TAG_START = "<!--PANWATCH_JSON-->"
 TAG_END = "<!--/PANWATCH_JSON-->"
+LEGACY_TAG_START = "<STRUCTURED_OUTPUT>"
+LEGACY_TAG_END = "</STRUCTURED_OUTPUT>"
+
+
+def _find_last_tagged_block(
+    text: str,
+    tag_pairs: list[tuple[str, str]],
+) -> tuple[int, int, str, str] | None:
+    """Find the last valid tagged block among multiple tag pairs."""
+    raw = text or ""
+    candidates: list[tuple[int, int, str, str]] = []
+    for start, end in tag_pairs:
+        i = raw.rfind(start)
+        if i < 0:
+            continue
+        j = raw.rfind(end)
+        if j < 0 or j <= i:
+            continue
+        candidates.append((i, j, start, end))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])
 
 
 def try_parse_action_json(text: str) -> dict | None:
@@ -71,13 +93,14 @@ def try_extract_tagged_json(
     """
 
     raw = text or ""
-    i = raw.rfind(start)
-    if i < 0:
+    tag_pairs = [(start, end)]
+    if start == TAG_START and end == TAG_END:
+        tag_pairs.append((LEGACY_TAG_START, LEGACY_TAG_END))
+    block = _find_last_tagged_block(raw, tag_pairs)
+    if block is None:
         return None
-    j = raw.rfind(end)
-    if j < 0 or j <= i:
-        return None
-    payload = raw[i + len(start) : j].strip()
+    i, j, block_start, _ = block
+    payload = raw[i + len(block_start) : j].strip()
     if not payload:
         return None
     try:
@@ -90,10 +113,11 @@ def try_extract_tagged_json(
 def strip_tagged_json(text: str, *, start: str = TAG_START, end: str = TAG_END) -> str:
     """Remove tagged JSON block from text (if present)."""
     raw = text or ""
-    i = raw.rfind(start)
-    if i < 0:
+    tag_pairs = [(start, end)]
+    if start == TAG_START and end == TAG_END:
+        tag_pairs.append((LEGACY_TAG_START, LEGACY_TAG_END))
+    block = _find_last_tagged_block(raw, tag_pairs)
+    if block is None:
         return raw
-    j = raw.rfind(end)
-    if j < 0 or j <= i:
-        return raw
-    return (raw[:i] + raw[j + len(end) :]).strip()
+    i, j, _, block_end = block
+    return (raw[:i] + raw[j + len(block_end) :]).strip()

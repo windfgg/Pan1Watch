@@ -252,7 +252,7 @@ class FundHoldingAnalystAgent(BaseAgent):
 4. **操作建议**：给出继续持有/加仓/减仓/定投的建议
 
 请在最后工整输出如下 JSON：
-<STRUCTURED_OUTPUT>
+<!--PANWATCH_JSON-->
 {
   "funds": {
     "基金代码": {
@@ -262,7 +262,7 @@ class FundHoldingAnalystAgent(BaseAgent):
     }
   }
 }
-</STRUCTURED_OUTPUT>"""
+<!--/PANWATCH_JSON-->"""
 
     async def analyze(self, context: AgentContext, data: dict) -> AnalysisResult:
         """调用 AI 分析，并保存历史与建议"""
@@ -284,14 +284,21 @@ class FundHoldingAnalystAgent(BaseAgent):
         structured = try_extract_tagged_json(content) or {}
         display_content = strip_tagged_json(content)
 
+        fund_watchlist_symbols = [
+            s for s in context.watchlist
+            if getattr(s, "market", None) and s.market.value == "FUND"
+        ]
         fund_items = [
             f"{(s.name or s.symbol).strip()}({s.symbol})"
-            for s in context.watchlist
-            if getattr(s, "market", None) and s.market.value == "FUND"
+            for s in fund_watchlist_symbols
         ]
         stock_names = "、".join(fund_items[:5]) if fund_items else "无基金"
         if len(fund_items) > 5:
             stock_names += f" 等{len(fund_items)}只"
+
+        # 使用实际基金代码作为 stock_symbol，便于后续按代码检索历史报告；
+        # 单只基金直接用其代码，多只基金用逗号拼接。
+        fund_symbol_str = ",".join(s.symbol for s in fund_watchlist_symbols) if fund_watchlist_symbols else "*"
 
         title = f"【{self.display_name}】{stock_names}"
         result = AnalysisResult(
@@ -304,7 +311,7 @@ class FundHoldingAnalystAgent(BaseAgent):
         # 保存历史分析
         save_analysis(
             agent_name=self.name,
-            stock_symbol="*",
+            stock_symbol=fund_symbol_str,
             title=title,
             content=result.content,
             raw_data={

@@ -38,7 +38,7 @@
 
 报告正文之后，请输出结构化的建议数据：
 
-<STRUCTURED_OUTPUT>
+<!--PANWATCH_JSON-->
 {
   "summary": "一句话总结本期分析结论",
   "funds": {
@@ -54,6 +54,6 @@
     }
   }
 }
-</STRUCTURED_OUTPUT>
+<!--/PANWATCH_JSON-->
 
 action 可选值：hold（继续持有）、add（考虑加仓）、reduce（考虑减仓）、dca（定投买入）、watch（暂时观望）

@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { Clock, Trash2, FileText, ArrowLeft } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { fetchAPI } from '@panwatch/api'
+import { sanitizeReportContent } from '@/lib/report-content'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Badge } from '@panwatch/base-ui/components/ui/badge'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@panwatch/base-ui/components/ui/select'
@@ -297,7 +299,7 @@ export default function HistoryPage() {
                 </div>
 
                 <div className="mt-4 p-4 bg-accent/20 rounded-xl prose prose-sm dark:prose-invert max-w-none max-h-[62vh] md:max-h-[62vh] overflow-y-auto scrollbar">
-                  <ReactMarkdown>{selectedRecord.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{sanitizeReportContent(selectedRecord.content)}</ReactMarkdown>
                 </div>
               </div>
             ) : (
@@ -321,7 +323,7 @@ export default function HistoryPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="mt-4 p-4 bg-accent/20 rounded-lg prose prose-sm dark:prose-invert max-w-none">
-            {detailRecord && <ReactMarkdown>{detailRecord.content}</ReactMarkdown>}
+            {detailRecord && <ReactMarkdown remarkPlugins={[remarkGfm]}>{sanitizeReportContent(detailRecord.content)}</ReactMarkdown>}
           </div>
           {detailRecord?.prompt_stats ? (
             <div className="mt-3 rounded-lg border border-border/50 p-3">
