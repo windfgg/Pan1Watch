@@ -586,6 +586,25 @@ def _create_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         trading_style=arguments.get("trading_style"),
     )
     db.add(position)
+    db.flush()
+
+    # 与 Web API 保持一致：创建持仓时自动写入一条初始建仓流水。
+    trade = PositionTrade(
+        position_id=position.id,
+        account_id=position.account_id,
+        stock_id=position.stock_id,
+        action="create",
+        quantity=float(position.quantity),
+        price=float(position.cost_price),
+        amount=float(position.cost_price) * float(position.quantity),
+        before_quantity=0.0,
+        after_quantity=float(position.quantity),
+        before_cost_price=0.0,
+        after_cost_price=float(position.cost_price),
+        trade_date=datetime.now().strftime("%Y-%m-%d"),
+        note="",
+    )
+    db.add(trade)
     db.commit()
     db.refresh(position)
     return _position_to_dict(position)

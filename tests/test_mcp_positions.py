@@ -418,6 +418,38 @@ class TestMcpPositions(unittest.TestCase):
         delete_data = delete_resp.json()["result"]["structuredContent"]
         self.assertTrue(delete_data["success"])
 
+    def test_positions_create_generates_initial_trade_record(self):
+        create_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.create",
+                "arguments": {
+                    "account_id": 1,
+                    "stock_id": 1,
+                    "cost_price": 88.8,
+                    "quantity": 12,
+                    "trading_style": "long",
+                },
+            },
+            req_id=50,
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        position_id = create_resp.json()["result"]["structuredContent"]["id"]
+
+        trades_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.trades.list",
+                "arguments": {"position_id": position_id},
+            },
+            req_id=51,
+        )
+        self.assertEqual(trades_resp.status_code, 200)
+        trades_data = trades_resp.json()["result"]["structuredContent"]
+        self.assertEqual(trades_data["count"], 1)
+        self.assertEqual(trades_data["items"][0]["action"], "create")
+        self.assertEqual(trades_data["items"][0]["after_quantity"], 12)
+
     def test_positions_create_handles_decimal_in_payload(self):
         with patch("src.web.api.mcp._position_to_dict") as mock_position_to_dict:
             mock_position_to_dict.return_value = {
