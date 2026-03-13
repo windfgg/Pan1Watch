@@ -32,6 +32,7 @@ def _quote_to_response(symbol: str, market: str, quote: dict | None) -> dict:
         return {
             "symbol": symbol,
             "market": market,
+            "exchange": None,
             "name": None,
             "current_price": None,
             "change_pct": None,
@@ -66,6 +67,7 @@ def _quote_to_response(symbol: str, market: str, quote: dict | None) -> dict:
     return {
         "symbol": symbol,
         "market": market,
+        "exchange": quote.get("exchange"),
         "name": quote.get("name"),
         "current_price": current_price,
         "change_pct": quote.get("change_pct"),

@@ -1,5 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+import threading
+import time
+from copy import deepcopy
 
 from pydantic import BaseModel, Field
 
@@ -7,6 +10,12 @@ from src.collectors.kline_collector import KlineCollector
 from src.models.market import MarketCode
 
 router = APIRouter()
+
+
+_KLINE_SUMMARY_CACHE_TTL_SECONDS = 60
+_KLINE_SUMMARY_CACHE: dict[str, tuple[float, dict]] = {}
+_KLINE_SUMMARY_LOCKS: dict[str, threading.Lock] = {}
+_KLINE_SUMMARY_GUARD = threading.Lock()
 
 
 # 分钟级K线周期
@@ -38,6 +47,61 @@ def _parse_market(market: str) -> MarketCode:
         return MarketCode(market)
     except ValueError:
         raise HTTPException(400, f"不支持的市场: {market}")
+
+
+def _summary_cache_key(symbol: str, market: MarketCode) -> str:
+    return f"{market.value}:{(symbol or '').strip().upper()}"
+
+
+def _get_summary_lock(key: str) -> threading.Lock:
+    with _KLINE_SUMMARY_GUARD:
+        lock = _KLINE_SUMMARY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _KLINE_SUMMARY_LOCKS[key] = lock
+        return lock
+
+
+def _get_cached_summary(key: str) -> dict | None:
+    now = time.time()
+    with _KLINE_SUMMARY_GUARD:
+        cached = _KLINE_SUMMARY_CACHE.get(key)
+        if not cached:
+            return None
+        ts, payload = cached
+        if (now - ts) > _KLINE_SUMMARY_CACHE_TTL_SECONDS:
+            _KLINE_SUMMARY_CACHE.pop(key, None)
+            return None
+        return deepcopy(payload)
+
+
+def _set_cached_summary(key: str, payload: dict) -> None:
+    with _KLINE_SUMMARY_GUARD:
+        _KLINE_SUMMARY_CACHE[key] = (time.time(), deepcopy(payload))
+
+
+def _get_kline_summary_cached(symbol: str, market_code: MarketCode) -> dict:
+    key = _summary_cache_key(symbol, market_code)
+    cached = _get_cached_summary(key)
+    if cached is not None:
+        return cached
+
+    # 同一个 symbol+market 只允许一个线程回源计算，避免并发放大外部请求
+    lock = _get_summary_lock(key)
+    with lock:
+        cached = _get_cached_summary(key)
+        if cached is not None:
+            return cached
+
+        collector = KlineCollector(market_code)
+        summary = collector.get_kline_summary(symbol)
+        payload = {
+            "symbol": symbol,
+            "market": market_code.value,
+            "summary": summary,
+        }
+        _set_cached_summary(key, payload)
+        return payload
 
 
 def _serialize_klines(klines) -> list[dict]:
@@ -168,13 +232,7 @@ def get_klines_batch(payload: KlineBatchRequest):
 def get_kline_summary(symbol: str, market: str = "CN"):
     """获取单只股票K线摘要"""
     market_code = _parse_market(market)
-    collector = KlineCollector(market_code)
-    summary = collector.get_kline_summary(symbol)
-    return {
-        "symbol": symbol,
-        "market": market_code.value,
-        "summary": summary,
-    }
+    return _get_kline_summary_cached(symbol, market_code)
 
 
 @router.post("/summary/batch")
@@ -186,14 +244,6 @@ def get_kline_summary_batch(payload: KlineSummaryBatchRequest):
     results = []
     for item in payload.items:
         market_code = _parse_market(item.market)
-        collector = KlineCollector(market_code)
-        summary = collector.get_kline_summary(item.symbol)
-        results.append(
-            {
-                "symbol": item.symbol,
-                "market": market_code.value,
-                "summary": summary,
-            }
-        )
+        results.append(_get_kline_summary_cached(item.symbol, market_code))
 
     return results

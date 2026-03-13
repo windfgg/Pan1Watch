@@ -86,11 +86,34 @@ def _parse_tencent_line(line: str) -> dict | None:
             except (TypeError, ValueError):
                 return None
 
-        # 处理美股 symbol（如 AAPL.OQ -> AAPL）
-        # 注意：指数 symbol 以 . 开头（如 .IXIC, .DJI），需要保留
-        symbol = parts[2]
-        if "." in symbol and not symbol.startswith("."):
-            symbol = symbol.split(".")[0]
+        # 处理美股 symbol（如 AAPL.OQ -> AAPL）并解析交易所后缀。
+        # 注意：指数 symbol 以 . 开头（如 .IXIC, .DJI），需要保留。
+        raw_symbol = parts[2]
+        symbol = raw_symbol
+        exchange = None
+        if "." in raw_symbol and not raw_symbol.startswith("."):
+            base, suffix = raw_symbol.split(".", 1)
+            symbol = base
+            sx = suffix.upper()
+            if sx in {"OQ", "NQ", "NSDQ", "NASDAQ"}:
+                exchange = "NASDAQ"
+            elif sx in {"N", "NYSE"}:
+                exchange = "NYSE"
+            elif sx in {"A", "AMEX"}:
+                exchange = "AMEX"
+
+        # A 股按代码前缀细分板块/交易所。
+        if exchange is None and symbol.isdigit():
+            if symbol.startswith(("300", "301")):
+                exchange = "创业板"
+            elif symbol.startswith(("688",)):
+                exchange = "科创板"
+            elif symbol.startswith(("600", "601", "603", "605", "689", "510", "511", "512", "513", "515", "518", "588", "900")):
+                exchange = "上交所"
+            elif symbol.startswith(("000", "001", "002", "003", "159", "160", "161", "162", "165", "200")):
+                exchange = "深交所"
+            elif symbol.startswith(("920", "83", "87", "88")):
+                exchange = "北交所"
 
         # 腾讯常见字段：
         # - 38=换手率(%)
@@ -112,6 +135,7 @@ def _parse_tencent_line(line: str) -> dict | None:
         return {
             "name": parts[1],
             "symbol": symbol,
+            "exchange": exchange,
             "current_price": float(parts[3] or 0),
             "prev_close": float(parts[4] or 0),
             "open_price": float(parts[5] or 0),

@@ -697,9 +697,12 @@ class KlineCollector:
         """
         return _fetch_eastmoney_intraday_klines(symbol, self.market, interval, limit)
 
-    def get_technical_indicators(self, symbol: str) -> TechnicalIndicators:
+    def get_technical_indicators(
+        self, symbol: str, klines: list[KlineData] | None = None
+    ) -> TechnicalIndicators:
         """计算技术指标"""
-        klines = self.get_klines(symbol, days=120)
+        if klines is None:
+            klines = self.get_klines(symbol, days=120)
 
         if not klines:
             return TechnicalIndicators()
@@ -854,11 +857,12 @@ class KlineCollector:
 
     def get_kline_summary(self, symbol: str) -> dict:
         """获取 K 线摘要（用于 prompt 和前端展示）"""
-        klines = self.get_klines(symbol, days=30)
-        indicators = self.get_technical_indicators(symbol)
-
-        if not klines:
+        klines_120 = self.get_klines(symbol, days=120)
+        if not klines_120:
             return {"error": "无K线数据"}
+
+        indicators = self.get_technical_indicators(symbol, klines=klines_120)
+        klines = klines_120[-30:] if len(klines_120) > 30 else klines_120
 
         # 最近5日表现
         recent_5 = klines[-5:] if len(klines) >= 5 else klines
