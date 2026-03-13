@@ -2,13 +2,14 @@
 import logging
 import time
 import httpx
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from src.web.database import get_db
-from src.web.models import Account, Position, Stock
+from src.web.models import Account, Position, PositionTrade, Stock
 from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
 from src.models.market import MarketCode
 
@@ -136,6 +137,34 @@ def validate_market_currency_pair(market: str, currency: str) -> None:
         raise HTTPException(400, f"{market} 账户的 base_currency 需为 {expected}")
 
 
+def _is_integer_quantity(quantity: float) -> bool:
+    return abs(float(quantity) - round(float(quantity))) < 1e-9
+
+
+def _quantity_decimal_places(quantity: float) -> int:
+    text = f"{float(quantity):.10f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1])
+
+
+def validate_position_quantity_for_market(quantity: float, market: str, *, allow_zero: bool = False) -> None:
+    value = float(quantity)
+    if value < 0 or (not allow_zero and value <= 0):
+        raise HTTPException(400, "持仓数量必须大于 0")
+    if allow_zero and abs(value) < 1e-9:
+        return
+
+    normalized_market = (market or "CN").upper()
+    if normalized_market == "US":
+        if _quantity_decimal_places(value) > 4:
+            raise HTTPException(400, "美股碎股最多支持到小数点后4位")
+        return
+
+    if normalized_market in {"CN", "HK"} and not _is_integer_quantity(value):
+        raise HTTPException(400, "A股和港股持仓数量仅支持整数；仅美股支持碎股")
+
+
 # ========== Pydantic Models ==========
 
 class AccountCreate(BaseModel):
@@ -169,14 +198,14 @@ class PositionCreate(BaseModel):
     account_id: int
     stock_id: int
     cost_price: float
-    quantity: int
+    quantity: float
     invested_amount: float | None = None
     trading_style: str | None = None  # short: 短线, swing: 波段, long: 长线
 
 
 class PositionUpdate(BaseModel):
     cost_price: float | None = None
-    quantity: int | None = None
+    quantity: float | None = None
     invested_amount: float | None = None
     trading_style: str | None = None
 
@@ -186,7 +215,7 @@ class PositionResponse(BaseModel):
     account_id: int
     stock_id: int
     cost_price: float
-    quantity: int
+    quantity: float
     invested_amount: float | None
     sort_order: int
     trading_style: str | None
@@ -199,6 +228,45 @@ class PositionResponse(BaseModel):
         from_attributes = True
 
 
+class PositionTradeCreate(BaseModel):
+    action: str  # add / reduce / overwrite
+    quantity: float
+    price: float
+    amount: float | None = None
+    trade_date: str | None = None  # YYYY-MM-DD
+    note: str | None = None
+
+
+class PositionTradeResponse(BaseModel):
+    id: int
+    position_id: int
+    account_id: int
+    stock_id: int
+    action: str
+    quantity: float
+    price: float
+    amount: float | None
+    before_quantity: float
+    after_quantity: float
+    before_cost_price: float
+    after_cost_price: float
+    trade_date: str | None
+    note: str | None
+    created_at: str | None
+    account_name: str | None = None
+    stock_symbol: str | None = None
+    stock_name: str | None = None
+
+
+class PositionTradeListResponse(BaseModel):
+    items: list[PositionTradeResponse]
+    count: int
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
 class PositionReorderItem(BaseModel):
     id: int
     sort_order: int
@@ -206,6 +274,104 @@ class PositionReorderItem(BaseModel):
 
 class PositionReorderRequest(BaseModel):
     items: list[PositionReorderItem]
+
+
+def _normalize_trade_action(action: str) -> str:
+    normalized = (action or "").strip().lower()
+    if normalized not in {"add", "reduce", "overwrite"}:
+        raise HTTPException(400, "action 仅支持 add/reduce/overwrite")
+    return normalized
+
+
+def _normalize_trade_date(value: str | None) -> str | None:
+    if value is None:
+        return datetime.now().strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text:
+        return datetime.now().strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(400, "trade_date 格式需为 YYYY-MM-DD") from exc
+    return text
+
+
+def _position_trade_to_dict(row: PositionTrade) -> dict:
+    return {
+        "id": row.id,
+        "position_id": row.position_id,
+        "account_id": row.account_id,
+        "stock_id": row.stock_id,
+        "action": row.action,
+        "quantity": row.quantity,
+        "price": row.price,
+        "amount": row.amount,
+        "before_quantity": row.before_quantity,
+        "after_quantity": row.after_quantity,
+        "before_cost_price": row.before_cost_price,
+        "after_cost_price": row.after_cost_price,
+        "trade_date": row.trade_date,
+        "note": row.note,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "account_name": row.position.account.name if row.position and row.position.account else None,
+        "stock_symbol": row.position.stock.symbol if row.position and row.position.stock else None,
+        "stock_name": row.position.stock.name if row.position and row.position.stock else None,
+    }
+
+
+def apply_position_trade(position: Position, payload: PositionTradeCreate, db: Session) -> PositionTrade:
+    action = _normalize_trade_action(payload.action)
+    quantity = float(payload.quantity)
+    price = float(payload.price)
+    if price <= 0:
+        raise HTTPException(400, "price 必须大于 0")
+    if quantity <= 0:
+        raise HTTPException(400, "quantity 必须大于 0")
+
+    market = str(position.stock.market if position.stock else "CN")
+    validate_position_quantity_for_market(quantity, market)
+
+    before_quantity = float(position.quantity)
+    before_cost_price = float(position.cost_price)
+    before_cost_value = before_quantity * before_cost_price
+
+    if action == "add":
+        after_quantity = before_quantity + quantity
+        after_cost_price = (before_cost_value + price * quantity) / after_quantity
+    elif action == "reduce":
+        if quantity - before_quantity > 1e-9:
+            raise HTTPException(400, "减仓数量不能超过当前持仓")
+        after_quantity = max(0.0, before_quantity - quantity)
+        after_cost_price = before_cost_price
+    else:  # overwrite
+        after_quantity = quantity
+        after_cost_price = price
+
+    validate_position_quantity_for_market(after_quantity, market, allow_zero=True)
+
+    position.quantity = after_quantity
+    position.cost_price = after_cost_price
+
+    trade = PositionTrade(
+        position_id=position.id,
+        account_id=position.account_id,
+        stock_id=position.stock_id,
+        action=action,
+        quantity=quantity,
+        price=price,
+        amount=float(payload.amount) if payload.amount is not None else price * quantity,
+        before_quantity=before_quantity,
+        after_quantity=after_quantity,
+        before_cost_price=before_cost_price,
+        after_cost_price=after_cost_price,
+        trade_date=_normalize_trade_date(payload.trade_date),
+        note=(payload.note or "").strip(),
+    )
+    db.add(trade)
+    db.commit()
+    db.refresh(position)
+    db.refresh(trade)
+    return trade
 
 
 # ========== Account Endpoints ==========
@@ -333,6 +499,8 @@ def create_position(data: PositionCreate, db: Session = Depends(get_db)):
     if not stock:
         raise HTTPException(400, "股票不存在")
 
+    validate_position_quantity_for_market(data.quantity, str(stock.market or "CN"))
+
     # 检查是否已存在该账户的该股票持仓
     existing = db.query(Position).filter(
         Position.account_id == data.account_id,
@@ -356,6 +524,26 @@ def create_position(data: PositionCreate, db: Session = Depends(get_db)):
         trading_style=data.trading_style,
     )
     db.add(position)
+    db.commit()
+    db.refresh(position)
+
+    # 创建初始建仓记录，便于前端展示完整操作轨迹
+    trade = PositionTrade(
+        position_id=position.id,
+        account_id=position.account_id,
+        stock_id=position.stock_id,
+        action="create",
+        quantity=float(position.quantity),
+        price=float(position.cost_price),
+        amount=float(position.cost_price) * float(position.quantity),
+        before_quantity=0.0,
+        after_quantity=float(position.quantity),
+        before_cost_price=0.0,
+        after_cost_price=float(position.cost_price),
+        trade_date=datetime.now().strftime("%Y-%m-%d"),
+        note="",
+    )
+    db.add(trade)
     db.commit()
     db.refresh(position)
 
@@ -385,6 +573,8 @@ def update_position(position_id: int, data: PositionUpdate, db: Session = Depend
     if data.cost_price is not None:
         position.cost_price = data.cost_price
     if data.quantity is not None:
+        stock_market = str(position.stock.market if position.stock else "CN")
+        validate_position_quantity_for_market(data.quantity, stock_market)
         position.quantity = data.quantity
     if data.invested_amount is not None:
         position.invested_amount = data.invested_amount
@@ -422,6 +612,53 @@ def delete_position(position_id: int, db: Session = Depends(get_db)):
     db.commit()
     logger.info(f"删除持仓: {position.account.name} - {position.stock.name}")
     return {"success": True}
+
+
+@router.get("/positions/{position_id}/trades", response_model=PositionTradeListResponse)
+def list_position_trades(
+    position_id: int,
+    page: int = 1,
+    page_size: int = 5,
+    db: Session = Depends(get_db),
+):
+    """获取某条持仓的交易记录（倒序，支持分页）"""
+    row = db.query(Position).filter(Position.id == position_id).first()
+    if not row:
+        raise HTTPException(404, "持仓不存在")
+
+    current_page = max(1, int(page or 1))
+    size = max(1, min(int(page_size or 5), 200))
+    query = db.query(PositionTrade).filter(
+        PositionTrade.position_id == position_id
+    )
+    total = int(query.count())
+    trades = query.order_by(PositionTrade.id.desc()).offset((current_page - 1) * size).limit(size).all()
+    return {
+        "items": [_position_trade_to_dict(item) for item in trades],
+        "count": len(trades),
+        "total": total,
+        "page": current_page,
+        "page_size": size,
+        "has_more": current_page * size < total,
+    }
+
+
+@router.post("/positions/{position_id}/trades", response_model=PositionTradeResponse)
+def create_position_trade(position_id: int, data: PositionTradeCreate, db: Session = Depends(get_db)):
+    """记录并执行持仓交易（加仓/减仓/覆盖）"""
+    position = db.query(Position).filter(Position.id == position_id).first()
+    if not position:
+        raise HTTPException(404, "持仓不存在")
+
+    trade = apply_position_trade(position, data, db)
+    logger.info(
+        "记录持仓交易: %s - %s, action=%s, qty=%s",
+        position.account.name if position.account else position.account_id,
+        position.stock.name if position.stock else position.stock_id,
+        trade.action,
+        trade.quantity,
+    )
+    return _position_trade_to_dict(trade)
 
 
 @router.put("/positions/reorder/batch")

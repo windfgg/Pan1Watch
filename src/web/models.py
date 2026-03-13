@@ -119,7 +119,7 @@ class Position(Base):
         Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False
     )
     cost_price = Column(Float, nullable=False)  # 成本价
-    quantity = Column(Integer, nullable=False)  # 持仓数量
+    quantity = Column(Float, nullable=False)  # 持仓数量（美股支持碎股）
     invested_amount = Column(Float, nullable=True)  # 投入资金（用于盘中监控）
     sort_order = Column(Integer, default=0)
     trading_style = Column(
@@ -130,6 +130,39 @@ class Position(Base):
 
     account = relationship("Account", back_populates="positions")
     stock = relationship("Stock", back_populates="positions")
+    trades = relationship(
+        "PositionTrade", back_populates="position", cascade="all, delete-orphan"
+    )
+
+
+class PositionTrade(Base):
+    """持仓交易流水（加仓/减仓/覆盖）"""
+
+    __tablename__ = "position_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    position_id = Column(
+        Integer, ForeignKey("positions.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id = Column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    stock_id = Column(
+        Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False
+    )
+    action = Column(String, nullable=False)  # add / reduce / overwrite / create
+    quantity = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)
+    amount = Column(Float, nullable=True)
+    before_quantity = Column(Float, nullable=False)
+    after_quantity = Column(Float, nullable=False)
+    before_cost_price = Column(Float, nullable=False)
+    after_cost_price = Column(Float, nullable=False)
+    trade_date = Column(String, nullable=True)  # YYYY-MM-DD
+    note = Column(String, default="")
+    created_at = Column(DateTime, server_default=func.now())
+
+    position = relationship("Position", back_populates="trades")
 
 
 class StockAgent(Base):

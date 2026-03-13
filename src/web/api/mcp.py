@@ -34,7 +34,14 @@ from src.collectors.akshare_collector import (
 from src.collectors.kline_collector import KlineCollector
 from src.collectors.news_collector import NewsCollector
 from src.collectors.fund_collector import fetch_fund_top_holdings, fetch_fund_performance
-from src.web.api.accounts import get_portfolio_summary, get_hkd_cny_rate, get_usd_cny_rate
+from src.web.api.accounts import (
+    PositionTradeCreate,
+    apply_position_trade,
+    get_hkd_cny_rate,
+    get_portfolio_summary,
+    get_usd_cny_rate,
+    validate_position_quantity_for_market,
+)
 from src.web.api.dashboard import get_dashboard_overview
 from src.web.api.auth import (
     ENV_AUTH_PASSWORD,
@@ -52,6 +59,7 @@ from src.models.market import MarketCode
 from src.web.models import (
     Account,
     Position,
+    PositionTrade,
     Stock,
     StockAgent,
     LogEntry,
@@ -78,6 +86,7 @@ logger = logging.getLogger(__name__)
 WRITE_TOOL_NAMES = {
     "positions.create",
     "positions.update",
+    "positions.trade",
     "positions.delete",
     "positions.reorder.batch",
     "stocks.create",
@@ -430,6 +439,29 @@ def _position_to_dict(position: Position) -> dict[str, Any]:
     }
 
 
+def _position_trade_to_dict(row: PositionTrade) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "position_id": row.position_id,
+        "account_id": row.account_id,
+        "stock_id": row.stock_id,
+        "action": row.action,
+        "quantity": row.quantity,
+        "price": row.price,
+        "amount": row.amount,
+        "before_quantity": row.before_quantity,
+        "after_quantity": row.after_quantity,
+        "before_cost_price": row.before_cost_price,
+        "after_cost_price": row.after_cost_price,
+        "trade_date": row.trade_date,
+        "note": row.note,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "account_name": row.position.account.name if row.position and row.position.account else None,
+        "stock_symbol": row.position.stock.symbol if row.position and row.position.stock else None,
+        "stock_name": row.position.stock.name if row.position and row.position.stock else None,
+    }
+
+
 def _require_args(arguments: dict[str, Any], fields: list[str]) -> None:
     for field in fields:
         if field not in arguments:
@@ -532,11 +564,21 @@ def _create_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         Position.account_id == account_id
     ).scalar() or 0
 
+    quantity = float(arguments["quantity"])
+    try:
+        validate_position_quantity_for_market(quantity, str(stock.market or "CN"))
+    except HTTPException as exc:
+        raise McpToolError(
+            error_code=ERR_INVALID_PARAMS,
+            message=str(exc.detail),
+            hint="请检查 quantity 是否符合市场规则（仅美股支持4位小数碎股）。",
+        ) from exc
+
     position = Position(
         account_id=account_id,
         stock_id=stock_id,
         cost_price=float(arguments["cost_price"]),
-        quantity=int(arguments["quantity"]),
+        quantity=quantity,
         invested_amount=arguments.get("invested_amount"),
         sort_order=int(max_order) + 1,
         trading_style=arguments.get("trading_style"),
@@ -561,7 +603,17 @@ def _update_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     if "cost_price" in arguments:
         row.cost_price = float(arguments["cost_price"])
     if "quantity" in arguments:
-        row.quantity = int(arguments["quantity"])
+        next_quantity = float(arguments["quantity"])
+        market = str(row.stock.market if row.stock else "CN")
+        try:
+            validate_position_quantity_for_market(next_quantity, market)
+        except HTTPException as exc:
+            raise McpToolError(
+                error_code=ERR_INVALID_PARAMS,
+                message=str(exc.detail),
+                hint="请检查 quantity 是否符合市场规则（仅美股支持4位小数碎股）。",
+            ) from exc
+        row.quantity = next_quantity
     if "invested_amount" in arguments:
         row.invested_amount = arguments["invested_amount"]
     if "trading_style" in arguments:
@@ -571,6 +623,59 @@ def _update_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     db.commit()
     db.refresh(row)
     return _position_to_dict(row)
+
+
+def _trade_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
+    _require_args(arguments, ["position_id", "action", "quantity", "price"])
+    position_id = int(arguments["position_id"])
+    row = db.query(Position).filter(Position.id == position_id).first()
+    if not row:
+        raise McpToolError(
+            error_code=ERR_NOT_FOUND,
+            message="持仓不存在",
+            hint="请检查 position_id 是否正确。",
+        )
+
+    payload = PositionTradeCreate(
+        action=str(arguments.get("action") or ""),
+        quantity=float(arguments.get("quantity") or 0),
+        price=float(arguments.get("price") or 0),
+        amount=float(arguments["amount"]) if arguments.get("amount") is not None else None,
+        trade_date=str(arguments.get("trade_date")) if arguments.get("trade_date") is not None else None,
+        note=str(arguments.get("note") or ""),
+    )
+    try:
+        trade = apply_position_trade(row, payload, db)
+    except HTTPException as exc:
+        raise McpToolError(
+            error_code=ERR_INVALID_PARAMS,
+            message=str(exc.detail),
+            hint="请检查 action/quantity/price 是否符合市场规则（仅美股支持4位小数碎股）。",
+        ) from exc
+    return _position_trade_to_dict(trade)
+
+
+def _list_position_trades(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
+    _require_args(arguments, ["position_id"])
+    position_id = int(arguments["position_id"])
+    page = int(arguments.get("page", 1) or 1)
+    page_size = int(arguments.get("page_size", 5) or 5)
+    current_page = max(1, page)
+    size = max(1, min(page_size, 200))
+
+    query = db.query(PositionTrade).filter(
+        PositionTrade.position_id == position_id
+    )
+    total = int(query.count())
+    rows = query.order_by(PositionTrade.id.desc()).offset((current_page - 1) * size).limit(size).all()
+    return {
+        "items": [_position_trade_to_dict(row) for row in rows],
+        "count": len(rows),
+        "total": total,
+        "page": current_page,
+        "page_size": size,
+        "has_more": current_page * size < total,
+    }
 
 
 def _delete_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
@@ -2217,8 +2322,8 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "持仓成本价（按股票原币种）。",
                 },
                 "quantity": {
-                    "type": "integer",
-                    "description": "持仓数量（股/份）。",
+                    "type": "number",
+                    "description": "持仓数量（股/份）。美股支持碎股，最多4位小数。",
                 },
                 "invested_amount": {
                     "type": ["number", "null"],
@@ -2269,8 +2374,8 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "新的持仓成本价。",
                 },
                 "quantity": {
-                    "type": "integer",
-                    "description": "新的持仓数量。",
+                    "type": "number",
+                    "description": "新的持仓数量。美股支持碎股，最多4位小数。",
                 },
                 "invested_amount": {
                     "type": ["number", "null"],
@@ -2289,12 +2394,87 @@ TOOLS: list[dict[str, Any]] = [
             "description": "更新后的持仓对象。",
             "properties": {
                 "id": {"type": "integer", "description": "持仓记录 ID。"},
-                "quantity": {"type": "integer", "description": "更新后的持仓数量。"},
+                "quantity": {"type": "number", "description": "更新后的持仓数量。"},
                 "cost_price": {"type": "number", "description": "更新后的成本价。"},
             },
         },
         "examples": [
             {"title": "更新持仓数量", "arguments": {"position_id": 10, "quantity": 200}},
+        ],
+    },
+    {
+        "name": "positions.trade",
+        "description": "对现有持仓执行加仓/减仓/覆盖，并写入交易记录",
+        "access": "write",
+        "tags": ["positions", "portfolio", "write"],
+        "risk_level": "high",
+        "cost_hint": "medium",
+        "inputSchema": {
+            "type": "object",
+            "description": "对 position_id 执行 add/reduce/overwrite，并落库记录。",
+            "required": ["position_id", "action", "quantity", "price"],
+            "properties": {
+                "position_id": {"type": "integer", "description": "持仓记录 ID。"},
+                "action": {"type": "string", "enum": ["add", "reduce", "overwrite"], "description": "交易动作。"},
+                "quantity": {"type": "number", "description": "本次交易数量。美股支持碎股，最多4位小数。"},
+                "price": {"type": "number", "description": "本次交易价格。"},
+                "amount": {"type": ["number", "null"], "description": "本次交易金额（可选）。"},
+                "trade_date": {"type": ["string", "null"], "description": "交易日期 YYYY-MM-DD（可选）。"},
+                "note": {"type": ["string", "null"], "description": "备注（可选）。"}
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "description": "新写入的交易记录。",
+            "properties": {
+                "id": {"type": "integer"},
+                "position_id": {"type": "integer"},
+                "action": {"type": "string"},
+                "quantity": {"type": "number"},
+                "before_quantity": {"type": "number"},
+                "after_quantity": {"type": "number"},
+                "before_cost_price": {"type": "number"},
+                "after_cost_price": {"type": "number"}
+            },
+        },
+        "examples": [
+            {"title": "加仓", "arguments": {"position_id": 10, "action": "add", "quantity": 20, "price": 11.5}},
+            {"title": "减仓", "arguments": {"position_id": 10, "action": "reduce", "quantity": 10, "price": 12.0}},
+            {"title": "美股碎股加仓", "arguments": {"position_id": 10, "action": "add", "quantity": 0.125, "price": 188.66}},
+        ],
+    },
+    {
+        "name": "positions.trades.list",
+        "description": "查询持仓交易记录（倒序）",
+        "access": "read",
+        "tags": ["positions", "portfolio", "read"],
+        "risk_level": "low",
+        "cost_hint": "low",
+        "inputSchema": {
+            "type": "object",
+            "required": ["position_id"],
+            "properties": {
+                "position_id": {"type": "integer", "description": "持仓记录 ID。"},
+                "page": {"type": "integer", "default": 1, "description": "页码，从1开始。"},
+                "page_size": {"type": "integer", "default": 5, "description": "每页条数 1-200。"}
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "description": "交易记录列表。"},
+                "count": {"type": "integer", "description": "返回条数。"},
+                "total": {"type": "integer", "description": "总条数。"},
+                "page": {"type": "integer", "description": "当前页码。"},
+                "page_size": {"type": "integer", "description": "每页条数。"},
+                "has_more": {"type": "boolean", "description": "是否有下一页。"}
+            },
+        },
+        "examples": [
+            {"title": "查看交易记录", "arguments": {"position_id": 10}},
+            {"title": "查看第2页", "arguments": {"position_id": 10, "page": 2, "page_size": 5}},
         ],
     },
     {
@@ -3362,6 +3542,10 @@ def _call_tool(
         return _create_position(arguments, db)
     if name == "positions.update":
         return _update_position(arguments, db)
+    if name == "positions.trade":
+        return _trade_position(arguments, db)
+    if name == "positions.trades.list":
+        return _list_position_trades(arguments, db)
     if name == "positions.delete":
         return _delete_position(arguments, db)
     if name == "positions.reorder.batch":

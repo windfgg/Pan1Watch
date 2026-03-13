@@ -97,6 +97,8 @@ class TestMcpPositions(unittest.TestCase):
         self.assertIn("stocks.list", names)
         self.assertIn("stocks.quotes", names)
         self.assertIn("stocks.resolve", names)
+        self.assertIn("positions.trade", names)
+        self.assertIn("positions.trades.list", names)
         self.assertIn("mcp.logs.query", names)
         self.assertIn("mcp.health", names)
         self.assertIn("mcp.auth.status", names)
@@ -366,6 +368,36 @@ class TestMcpPositions(unittest.TestCase):
         self.assertEqual(update_resp.status_code, 200)
         update_data = update_resp.json()["result"]["structuredContent"]
         self.assertEqual(update_data["quantity"], 20)
+
+        trade_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.trade",
+                "arguments": {
+                    "position_id": position_id,
+                    "action": "add",
+                    "quantity": 5,
+                    "price": 110.0,
+                },
+            },
+            req_id=33,
+        )
+        self.assertEqual(trade_resp.status_code, 200)
+        trade_data = trade_resp.json()["result"]["structuredContent"]
+        self.assertEqual(trade_data["action"], "add")
+        self.assertEqual(trade_data["after_quantity"], 25)
+
+        trades_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.trades.list",
+                "arguments": {"position_id": position_id},
+            },
+            req_id=34,
+        )
+        self.assertEqual(trades_resp.status_code, 200)
+        trades_data = trades_resp.json()["result"]["structuredContent"]
+        self.assertGreaterEqual(trades_data["count"], 1)
 
         list_resp = self._rpc(
             "tools/call",

@@ -1482,6 +1482,107 @@ WHERE id = :account_id
         )
 
 
+def _m115_position_quantity_to_real(conn: Connection) -> None:
+    if not _has_table(conn, "positions"):
+        return
+
+    columns = conn.execute(text("PRAGMA table_info(positions)")).fetchall()
+    quantity_type = ""
+    for col in columns:
+        if len(col) > 2 and str(col[1]) == "quantity":
+            quantity_type = str(col[2] or "").upper()
+            break
+
+    if "REAL" in quantity_type or "FLOAT" in quantity_type or "DOUBLE" in quantity_type:
+        return
+
+    conn.execute(text("PRAGMA foreign_keys=OFF"))
+    try:
+        conn.execute(
+            text(
+                """
+CREATE TABLE IF NOT EXISTS positions__new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  stock_id INTEGER NOT NULL REFERENCES stocks(id) ON DELETE CASCADE,
+  cost_price FLOAT NOT NULL,
+  quantity REAL NOT NULL,
+  invested_amount FLOAT,
+  sort_order INTEGER DEFAULT 0,
+  trading_style TEXT DEFAULT 'swing',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_account_stock UNIQUE (account_id, stock_id)
+)
+"""
+            )
+        )
+        conn.execute(
+            text(
+                """
+INSERT INTO positions__new (
+  id, account_id, stock_id, cost_price, quantity, invested_amount, sort_order, trading_style, created_at, updated_at
+)
+SELECT
+  id,
+  account_id,
+  stock_id,
+  cost_price,
+  CAST(quantity AS REAL),
+  invested_amount,
+  COALESCE(sort_order, 0),
+  COALESCE(trading_style, 'swing'),
+  created_at,
+  updated_at
+FROM positions
+"""
+            )
+        )
+        conn.execute(text("DROP TABLE positions"))
+        conn.execute(text("ALTER TABLE positions__new RENAME TO positions"))
+    finally:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+
+
+def _m116_position_trades_table(conn: Connection) -> None:
+    if _has_table(conn, "position_trades"):
+        return
+
+    conn.execute(
+        text(
+            """
+CREATE TABLE IF NOT EXISTS position_trades (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  stock_id INTEGER NOT NULL REFERENCES stocks(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  quantity REAL NOT NULL,
+  price FLOAT NOT NULL,
+  amount FLOAT,
+  before_quantity REAL NOT NULL,
+  after_quantity REAL NOT NULL,
+  before_cost_price FLOAT NOT NULL,
+  after_cost_price FLOAT NOT NULL,
+  trade_date TEXT,
+  note TEXT DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+        )
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_position_trades_position_id",
+        "CREATE INDEX ix_position_trades_position_id ON position_trades(position_id)",
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_position_trades_created_at",
+        "CREATE INDEX ix_position_trades_created_at ON position_trades(created_at)",
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -1497,6 +1598,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(112, "strategy_analytics_snapshots", _m112_strategy_analytics_snapshots),
     Migration(113, "market_scan_snapshot_and_mixed_source", _m113_market_scan_snapshot_and_mixed_source),
     Migration(114, "account_market_and_currency", _m114_account_market_and_currency),
+    Migration(115, "position_quantity_to_real", _m115_position_quantity_to_real),
+    Migration(116, "position_trades_table", _m116_position_trades_table),
 )
 
 
