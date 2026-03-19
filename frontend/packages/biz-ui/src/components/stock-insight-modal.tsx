@@ -418,7 +418,7 @@ export default function StockInsightModal(props: {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [klineRefreshTrigger, setKlineRefreshTrigger] = useState(0)
   const [overviewHighlightKey, setOverviewHighlightKey] = useState(0)
-  const [overviewHighlightUp, setOverviewHighlightUp] = useState<boolean | null>(null)
+  const [overviewHighlightUp, setOverviewHighlightUp] = useState(false)
   const prevQuoteRef = useRef<{ current_price: number | null; change_pct: number | null } | null>(null)
   const quoteStateRef = useRef<QuoteResponse | null>(null)
   const [quote, setQuote] = useState<QuoteResponse | null>(null)
@@ -907,9 +907,8 @@ export default function StockInsightModal(props: {
       const prevPrice = prev.current_price ?? 0
       const currPrice = current.current_price ?? 0
       const delta = currPrice - prevPrice
-      const pctChanged = (prev.change_pct ?? null) !== (current.change_pct ?? null)
-      if (delta !== 0 || pctChanged) {
-        setOverviewHighlightUp(delta > 0 ? true : delta < 0 ? false : null)
+      if (delta !== 0) {
+        setOverviewHighlightUp(delta > 0)
         setOverviewHighlightKey(k => k + 1)
       }
     }
@@ -917,11 +916,9 @@ export default function StockInsightModal(props: {
   }, [quote])
 
   const overviewHighlightClass = overviewHighlightKey > 0
-    ? overviewHighlightUp === true
+    ? overviewHighlightUp
       ? 'animate-highlight-fade-up'
-      : overviewHighlightUp === false
-        ? 'animate-highlight-fade-down'
-        : 'animate-highlight-fade-neutral'
+      : 'animate-highlight-fade-down'
     : ''
   const levelColor = (value: number | null | undefined) => {
     if (value == null || quote?.prev_close == null) return 'text-foreground'

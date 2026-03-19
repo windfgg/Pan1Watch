@@ -207,7 +207,7 @@ export default function InteractiveKline(props: {
 
   const isIntraday = INTRADAY_INTERVALS.has(interval)
   const [highlightKey, setHighlightKey] = useState(0)
-  const [highlightUp, setHighlightUp] = useState<boolean | null>(null)
+  const [highlightUp, setHighlightUp] = useState(false)
   const prevMetricRef = useRef<{ close: number; changePct: number } | null>(null)
 
   const fixedDays = useMemo(() => {
@@ -346,18 +346,18 @@ export default function InteractiveKline(props: {
     const prev = prevMetricRef.current
     if (prev) {
       const delta = current.close - prev.close
-      setHighlightUp(delta > 0 ? true : delta < 0 ? false : null)
-      setHighlightKey(k => k + 1)
+      if (delta !== 0) {
+        setHighlightUp(delta > 0)
+        setHighlightKey(k => k + 1)
+      }
     }
     prevMetricRef.current = current
   }, [latestMetrics])
 
   const highlightClass = highlightKey > 0
-    ? highlightUp === true
+    ? highlightUp
       ? 'animate-highlight-fade-up'
-      : highlightUp === false
-        ? 'animate-highlight-fade-down'
-        : 'animate-highlight-fade-neutral'
+      : 'animate-highlight-fade-down'
     : ''
 
   const indexByDate = useMemo(() => {

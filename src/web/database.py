@@ -10,7 +10,8 @@ from src.web.migrations import has_pending_migrations, run_versioned_migrations
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "panwatch.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "..",
+                       "..", "data", "panwatch.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
@@ -160,10 +161,12 @@ def _migrate(engine):
 
         # 初始化排序字段（仅对未初始化数据）
         if _has_column(conn, "stocks", "sort_order"):
-            conn.execute(text("UPDATE stocks SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0"))
+            conn.execute(text(
+                "UPDATE stocks SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0"))
             conn.commit()
         if _has_column(conn, "positions", "sort_order"):
-            conn.execute(text("UPDATE positions SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0"))
+            conn.execute(text(
+                "UPDATE positions SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0"))
             conn.commit()
 
         # Create new tables if missing (SQLite)
@@ -225,7 +228,8 @@ def _migrate_old_providers(engine):
                     ),
                     {"name": name, "base_url": base_url, "api_key": api_key},
                 )
-                result = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+                result = conn.execute(
+                    text("SELECT last_insert_rowid()")).scalar()
                 service_map[key] = result
 
             service_id = service_map[key]
@@ -240,7 +244,8 @@ def _migrate_old_providers(engine):
                     "is_default": is_default,
                 },
             )
-            new_model_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+            new_model_id = conn.execute(
+                text("SELECT last_insert_rowid()")).scalar()
 
             # Update references: agent_configs.ai_provider_id → ai_model_id
             if _has_column(conn, "agent_configs", "ai_provider_id"):
@@ -272,7 +277,8 @@ def _migrate_settings_to_models(engine):
         if not _has_table(conn, "app_settings"):
             return
 
-        rows = conn.execute(text("SELECT key, value FROM app_settings")).fetchall()
+        rows = conn.execute(
+            text("SELECT key, value FROM app_settings")).fetchall()
         settings_map = {row[0]: row[1] for row in rows}
 
         ai_base_url = settings_map.get("ai_base_url", "")
@@ -281,7 +287,8 @@ def _migrate_settings_to_models(engine):
 
         # Migrate AI settings if present and no services exist yet
         if ai_base_url and ai_model:
-            existing = conn.execute(text("SELECT COUNT(*) FROM ai_services")).scalar()
+            existing = conn.execute(
+                text("SELECT COUNT(*) FROM ai_services")).scalar()
             if existing == 0:
                 conn.execute(
                     text(
@@ -289,7 +296,8 @@ def _migrate_settings_to_models(engine):
                     ),
                     {"name": ai_model, "base_url": ai_base_url, "api_key": ai_api_key},
                 )
-                service_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+                service_id = conn.execute(
+                    text("SELECT last_insert_rowid()")).scalar()
                 conn.execute(
                     text(
                         "INSERT INTO ai_models (name, service_id, model, is_default) VALUES (:name, :service_id, :model, 1)"
@@ -307,7 +315,8 @@ def _migrate_settings_to_models(engine):
                 text("SELECT COUNT(*) FROM notify_channels")
             ).scalar()
             if existing == 0:
-                config_json = json.dumps({"bot_token": bot_token, "chat_id": chat_id})
+                config_json = json.dumps(
+                    {"bot_token": bot_token, "chat_id": chat_id})
                 conn.execute(
                     text(
                         "INSERT INTO notify_channels (name, type, config, enabled, is_default) VALUES (:name, :type, :config, 1, 1)"
@@ -327,7 +336,8 @@ def _migrate_settings_to_models(engine):
         for key in old_keys:
             if key in settings_map:
                 conn.execute(
-                    text("DELETE FROM app_settings WHERE key = :key"), {"key": key}
+                    text("DELETE FROM app_settings WHERE key = :key"), {
+                        "key": key}
                 )
 
         conn.commit()
@@ -343,7 +353,8 @@ def _migrate_positions_to_accounts(engine):
         if not _has_table(conn, "accounts"):
             return
 
-        existing_accounts = conn.execute(text("SELECT COUNT(*) FROM accounts")).scalar()
+        existing_accounts = conn.execute(
+            text("SELECT COUNT(*) FROM accounts")).scalar()
         if existing_accounts > 0:
             return
 
@@ -362,7 +373,7 @@ def _migrate_positions_to_accounts(engine):
             # 没有持仓数据，创建一个空的默认账户
             conn.execute(
                 text(
-                    "INSERT INTO accounts (name, available_funds, enabled) VALUES ('默认账户', 0, 1)"
+                    "INSERT INTO accounts (name, market, base_currency, available_funds, enabled) VALUES ('默认账户', 'CN', 'CNY', 0, 1)"
                 )
             )
             conn.commit()
@@ -378,7 +389,7 @@ def _migrate_positions_to_accounts(engine):
 
         conn.execute(
             text(
-                "INSERT INTO accounts (name, available_funds, enabled) VALUES (:name, :funds, 1)"
+                "INSERT INTO accounts (name, market, base_currency, available_funds, enabled) VALUES (:name, 'CN', 'CNY', :funds, 1)"
             ),
             {"name": "默认账户", "funds": available_funds},
         )
@@ -402,7 +413,8 @@ def _migrate_positions_to_accounts(engine):
             )
 
         # 删除旧的 available_funds 设置
-        conn.execute(text("DELETE FROM app_settings WHERE key = 'available_funds'"))
+        conn.execute(
+            text("DELETE FROM app_settings WHERE key = 'available_funds'"))
 
         conn.commit()
         logger.info(f"已迁移 {len(stocks_with_position)} 条持仓数据到默认账户")
@@ -426,7 +438,8 @@ WHERE COALESCE(enabled, 1) = 0
 """
             )
         )
-        conn.execute(text("UPDATE stocks SET enabled = 1 WHERE COALESCE(enabled, 1) = 0"))
+        conn.execute(
+            text("UPDATE stocks SET enabled = 1 WHERE COALESCE(enabled, 1) = 0"))
         conn.commit()
 
         # 优先直接删列；旧版 SQLite 不支持时，重建表以确保物理移除。

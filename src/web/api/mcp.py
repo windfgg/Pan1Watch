@@ -222,14 +222,16 @@ def _mcp_logs_query(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     if tool_name:
         query = query.filter(
             or_(
-                func.json_extract(LogEntry.tags, "$.mcp.tool_name") == tool_name,
+                func.json_extract(
+                    LogEntry.tags, "$.mcp.tool_name") == tool_name,
                 LogEntry.message.contains(f"tool={tool_name}"),
             )
         )
     if status_text:
         query = query.filter(
             or_(
-                func.json_extract(LogEntry.tags, "$.mcp.status") == status_text,
+                func.json_extract(
+                    LogEntry.tags, "$.mcp.status") == status_text,
                 LogEntry.message.contains(f"status={status_text}"),
             )
         )
@@ -243,7 +245,8 @@ def _mcp_logs_query(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
     if auth:
         query = query.filter(
             or_(
-                func.lower(func.json_extract(LogEntry.tags, "$.mcp.auth")) == auth,
+                func.lower(func.json_extract(
+                    LogEntry.tags, "$.mcp.auth")) == auth,
                 LogEntry.message.contains(f"auth={auth}"),
             )
         )
@@ -568,7 +571,8 @@ def _create_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
 
     quantity = float(arguments["quantity"])
     try:
-        validate_position_quantity_for_market(quantity, str(stock.market or "CN"))
+        validate_position_quantity_for_market(
+            quantity, str(stock.market or "CN"))
     except HTTPException as exc:
         raise McpToolError(
             error_code=ERR_INVALID_PARAMS,
@@ -661,8 +665,10 @@ def _trade_position(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         action=str(arguments.get("action") or ""),
         quantity=float(arguments.get("quantity") or 0),
         price=float(arguments.get("price") or 0),
-        amount=float(arguments["amount"]) if arguments.get("amount") is not None else None,
-        trade_date=str(arguments.get("trade_date")) if arguments.get("trade_date") is not None else None,
+        amount=float(arguments["amount"]) if arguments.get(
+            "amount") is not None else None,
+        trade_date=str(arguments.get("trade_date")) if arguments.get(
+            "trade_date") is not None else None,
         note=str(arguments.get("note") or ""),
     )
     try:
@@ -688,7 +694,8 @@ def _list_position_trades(arguments: dict[str, Any], db: Session) -> dict[str, A
         PositionTrade.position_id == position_id
     )
     total = int(query.count())
-    rows = query.order_by(PositionTrade.id.desc()).offset((current_page - 1) * size).limit(size).all()
+    rows = query.order_by(PositionTrade.id.desc()).offset(
+        (current_page - 1) * size).limit(size).all()
     return {
         "items": [_position_trade_to_dict(row) for row in rows],
         "count": len(rows),
@@ -1068,8 +1075,10 @@ def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
             if len(sym) == 5:
                 return ["HK", "CN", "FUND", "US"]
             if len(sym) == 6:
-                fund_prefixes = ("15", "16", "50", "51", "52", "56", "58", "59")
-                cn_stock_prefixes = ("00", "30", "60", "68", "83", "87", "43", "92")
+                fund_prefixes = ("15", "16", "50", "51",
+                                 "52", "56", "58", "59")
+                cn_stock_prefixes = ("00", "30", "60", "68",
+                                     "83", "87", "43", "92")
                 if sym.startswith(fund_prefixes):
                     return ["FUND", "CN", "HK", "US"]
                 if sym.startswith(cn_stock_prefixes):
@@ -1124,7 +1133,8 @@ def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
         for mkt in search_markets:
             candidates = search_stocks(symbol, mkt, limit=50)
             for c in candidates:
-                c_symbol = _normalize_symbol(str(c.get("symbol", "")), str(c.get("market", "")).upper())
+                c_symbol = _normalize_symbol(
+                    str(c.get("symbol", "")), str(c.get("market", "")).upper())
                 c_market = str(c.get("market", "")).upper()
                 if c_symbol in symbol_candidates and (not market or c_market == market or (market in ("CN", "FUND") and c_market in ("CN", "FUND"))):
                     matched_candidate = c
@@ -1137,7 +1147,8 @@ def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
                 str(matched_candidate.get("symbol", "")),
                 str(matched_candidate.get("market", "")).upper(),
             )
-            cand_market = str(matched_candidate.get("market", "")).strip().upper() or (market or "CN")
+            cand_market = str(matched_candidate.get(
+                "market", "")).strip().upper() or (market or "CN")
             existing = db.query(Stock).filter(
                 Stock.symbol == cand_symbol,
                 Stock.market == cand_market,
@@ -1148,7 +1159,8 @@ def _resolve_stock(arguments: dict[str, Any], db: Session) -> dict[str, Any]:
                 max_order = db.query(func.max(Stock.sort_order)).scalar() or 0
                 created = Stock(
                     symbol=cand_symbol,
-                    name=str(matched_candidate.get("name", "")).strip() or cand_symbol,
+                    name=str(matched_candidate.get("name", "")
+                             ).strip() or cand_symbol,
                     market=cand_market,
                     sort_order=int(max_order) + 1,
                 )
@@ -2460,9 +2472,12 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "examples": [
-            {"title": "加仓", "arguments": {"position_id": 10, "action": "add", "quantity": 20, "price": 11.5}},
-            {"title": "减仓", "arguments": {"position_id": 10, "action": "reduce", "quantity": 10, "price": 12.0}},
-            {"title": "美股碎股加仓", "arguments": {"position_id": 10, "action": "add", "quantity": 0.125, "price": 188.66}},
+            {"title": "加仓", "arguments": {"position_id": 10,
+                                          "action": "add", "quantity": 20, "price": 11.5}},
+            {"title": "减仓", "arguments": {"position_id": 10,
+                                          "action": "reduce", "quantity": 10, "price": 12.0}},
+            {"title": "美股碎股加仓", "arguments": {"position_id": 10,
+                                              "action": "add", "quantity": 0.125, "price": 188.66}},
         ],
     },
     {
@@ -2495,7 +2510,8 @@ TOOLS: list[dict[str, Any]] = [
         },
         "examples": [
             {"title": "查看交易记录", "arguments": {"position_id": 10}},
-            {"title": "查看第2页", "arguments": {"position_id": 10, "page": 2, "page_size": 5}},
+            {"title": "查看第2页", "arguments": {
+                "position_id": 10, "page": 2, "page_size": 5}},
         ],
     },
     {
@@ -2866,8 +2882,10 @@ TOOLS: list[dict[str, Any]] = [
         },
         "examples": [
             {"title": "查看最近审计日志", "arguments": {"limit": 20}},
-            {"title": "筛选持仓写操作", "arguments": {"tool_name": "positions.create", "limit": 20}},
-            {"title": "只看失败操作", "arguments": {"status": "error:MCP_RESOURCE_CONFLICT", "limit": 20}},
+            {"title": "筛选持仓写操作", "arguments": {
+                "tool_name": "positions.create", "limit": 20}},
+            {"title": "只看失败操作", "arguments": {
+                "status": "error:MCP_RESOURCE_CONFLICT", "limit": 20}},
         ],
     },
     # ==================== 自选股管理 ====================

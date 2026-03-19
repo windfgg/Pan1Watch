@@ -278,7 +278,8 @@ class TestMcpPositions(unittest.TestCase):
         try:
             db.add(
                 LogEntry(
-                    timestamp=datetime(2026, 3, 12, 0, 0, 0, tzinfo=timezone.utc),
+                    timestamp=datetime(2026, 3, 12, 0, 0, 0,
+                                       tzinfo=timezone.utc),
                     level="INFO",
                     logger_name="src.web.api.mcp",
                     message="[mcp.audit] user=mcp_user auth=basic perm=rw tool=positions.create status=success duration_ms=12 args={}",
@@ -486,6 +487,71 @@ class TestMcpPositions(unittest.TestCase):
         data = body["result"]["structuredContent"]
         self.assertEqual(data["cost_price"], "154.7")
         self.assertEqual(data["quantity"], "21")
+
+    def test_positions_trade_reduce_and_overwrite_generate_records(self):
+        create_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.create",
+                "arguments": {
+                    "account_id": 1,
+                    "stock_id": 1,
+                    "cost_price": 100.0,
+                    "quantity": 10,
+                },
+            },
+            req_id=52,
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        position_id = create_resp.json()["result"]["structuredContent"]["id"]
+
+        reduce_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.trade",
+                "arguments": {
+                    "position_id": position_id,
+                    "action": "reduce",
+                    "quantity": 2,
+                    "price": 105.0,
+                },
+            },
+            req_id=53,
+        )
+        self.assertEqual(reduce_resp.status_code, 200)
+        reduce_data = reduce_resp.json()["result"]["structuredContent"]
+        self.assertEqual(reduce_data["action"], "reduce")
+
+        overwrite_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.trade",
+                "arguments": {
+                    "position_id": position_id,
+                    "action": "overwrite",
+                    "quantity": 6,
+                    "price": 98.0,
+                },
+            },
+            req_id=54,
+        )
+        self.assertEqual(overwrite_resp.status_code, 200)
+        overwrite_data = overwrite_resp.json()["result"]["structuredContent"]
+        self.assertEqual(overwrite_data["action"], "overwrite")
+
+        trades_resp = self._rpc(
+            "tools/call",
+            {
+                "name": "positions.trades.list",
+                "arguments": {"position_id": position_id, "page_size": 20},
+            },
+            req_id=55,
+        )
+        self.assertEqual(trades_resp.status_code, 200)
+        items = trades_resp.json()["result"]["structuredContent"]["items"]
+        actions = [it["action"] for it in items]
+        self.assertIn("reduce", actions)
+        self.assertIn("overwrite", actions)
 
 
 if __name__ == "__main__":

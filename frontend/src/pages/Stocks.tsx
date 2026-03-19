@@ -53,6 +53,7 @@ interface Account {
   id: number
   name: string
   market: string
+  markets?: string[]
   base_currency: string
   available_funds: number
   enabled: boolean
@@ -88,6 +89,7 @@ interface AccountSummary {
   id: number
   name: string
   market: string
+  markets?: string[]
   base_currency: string
   display_currency?: string
   available_funds: number
@@ -172,7 +174,7 @@ interface StockForm {
 
 interface AccountForm {
   name: string
-  market: string
+  markets: string[]
   base_currency: string
   available_funds: string
 }
@@ -298,7 +300,14 @@ interface PriceAlertRuleSummary {
 }
 
 const emptyStockForm: StockForm = { symbol: '', name: '', market: 'CN' }
-const emptyAccountForm: AccountForm = { name: '', market: 'CN', base_currency: 'CNY', available_funds: '0' }
+const ACCOUNT_MARKET_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'CN', label: 'A股' },
+  { value: 'HK', label: '港股' },
+  { value: 'US', label: '美股' },
+  { value: 'FUND', label: '基金' },
+]
+
+const emptyAccountForm: AccountForm = { name: '', markets: ['CN'], base_currency: 'CNY', available_funds: '0' }
 
 const round2 = (value: number) => Math.round(value * 100) / 100
 type AccountSortKey = 'name' | 'total_assets' | 'total_pnl' | 'day_pnl' | 'total_market_value' | 'available_funds'
@@ -330,7 +339,8 @@ const POSITION_COLUMN_META: Record<PositionColumnKey, { label: string; align: 't
 
 const mergePortfolioQuotes = (
   portfolio: PortfolioSummary | null,
-  quotes: Record<string, { current_price: number | null; change_pct: number | null }>
+  quotes: Record<string, { current_price: number | null; change_pct: number | null }>,
+  closedMarkets: Set<string> = new Set()
 ): PortfolioSummary | null => {
   if (!portfolio) return null
 
@@ -368,9 +378,10 @@ const mergePortfolioQuotes = (
       const current_price = quote?.current_price ?? pos.current_price ?? null
       const change_pct = quote?.change_pct ?? pos.change_pct ?? null
       const positionCurrency = (pos.currency || (pos.market === 'HK' ? 'HKD' : pos.market === 'US' ? 'USD' : 'CNY')).toUpperCase()
+      const marketCode = (pos.market || 'CN').toUpperCase()
+      const isClosedMarket = closedMarkets.has(marketCode)
 
       const cost = convertAmount(pos.cost_price * pos.quantity, positionCurrency, displayCurrency)
-      accCost += cost
 
       let market_value: number | null = null
       let market_value_display: number | null = null
@@ -383,10 +394,14 @@ const mergePortfolioQuotes = (
         market_value = current_price * pos.quantity
         market_value_display = convertAmount(market_value, positionCurrency, displayCurrency)
         accMarketValue += market_value_display
+        accCost += cost
         pnl = market_value_display - cost
         pnl_pct = cost > 0 ? (pnl / cost * 100) : 0
 
-        if (change_pct != null) {
+        if (isClosedMarket) {
+          day_pnl = 0
+          day_pnl_pct = 0
+        } else if (change_pct != null) {
           const prevPrice = change_pct === -100 ? null : (current_price / (1 + change_pct / 100))
           if (prevPrice != null && isFinite(prevPrice) && prevPrice > 0) {
             const prevMarketValue = prevPrice * pos.quantity
@@ -563,6 +578,13 @@ export default function StocksPage() {
 
   // Market status
   const [marketStatus, setMarketStatus] = useState<MarketStatus[]>([])
+  const closedMarketCodes = useMemo(() => {
+    return new Set(
+      (marketStatus || [])
+        .filter(m => String(m.status || '').toLowerCase() === 'closed')
+        .map(m => String(m.code || '').toUpperCase())
+    )
+  }, [marketStatus])
   // Guard to prevent overlapping K线刷新任务导致实际并发超限
   const klineRefreshInFlight = useRef<Promise<void> | null>(null)
 
@@ -615,8 +637,8 @@ export default function StocksPage() {
   const [watchlistKeyword, setWatchlistKeyword] = useState('')
   const [watchlistOnlyAlerts, setWatchlistOnlyAlerts] = useLocalStorage<boolean>('panwatch_watchlist_only_alerts', false)
   const [watchlistViewMode, setWatchlistViewMode] = useLocalStorage<'card' | 'list'>('panwatch_watchlist_view_mode', 'card')
-  const [portfolioKpiFlashMap, setPortfolioKpiFlashMap] = useState<Record<string, { key: number; dir: 'up' | 'down' | 'neutral' }>>({})
-  const [watchlistQuoteFlashMap, setWatchlistQuoteFlashMap] = useState<Record<string, 'up' | 'down' | 'neutral'>>({})
+  const [portfolioKpiFlashMap, setPortfolioKpiFlashMap] = useState<Record<string, { key: number; dir: 'up' | 'down' }>>({})
+  const [watchlistQuoteFlashMap, setWatchlistQuoteFlashMap] = useState<Record<string, 'up' | 'down'>>({})
   const prevPortfolioKpiRef = useRef<Record<string, number>>({})
   const prevWatchlistQuoteRef = useRef<Record<string, { current_price: number | null; change_pct: number | null }>>({})
 
@@ -766,7 +788,7 @@ export default function StocksPage() {
       // 核心数据：仅本地账户/持仓
       const portfolioData = await fetchAPI<PortfolioSummary>(`/portfolio/summary?include_quotes=false&display_currency=${encodeURIComponent(displayCurrency)}`)
       setPortfolioRaw(portfolioData)
-      setPortfolio(mergePortfolioQuotes(portfolioData, quotes))
+      setPortfolio(mergePortfolioQuotes(portfolioData, quotes, closedMarketCodes))
       setLastRefreshTime(new Date())
 
       // 市场状态（非核心，失败不影响页面）
@@ -844,8 +866,8 @@ export default function StocksPage() {
 
   useEffect(() => {
     if (!portfolioRaw) return
-    setPortfolio(mergePortfolioQuotes(portfolioRaw, quotes))
-  }, [portfolioRaw, quotes])
+    setPortfolio(mergePortfolioQuotes(portfolioRaw, quotes, closedMarketCodes))
+  }, [portfolioRaw, quotes, closedMarketCodes])
 
   useEffect(() => {
     if (stocks.length === 0 && (!portfolioRaw || portfolioRaw.accounts.length === 0)) return
@@ -1366,9 +1388,12 @@ export default function StocksPage() {
   // ========== Account handlers ==========
   const openAccountDialog = (account?: Account) => {
     if (account) {
+      const parsedMarkets = Array.isArray(account.markets) && account.markets.length > 0
+        ? account.markets.map(m => String(m || '').toUpperCase()).filter(Boolean)
+        : String(account.market || 'CN').split(',').map(m => m.trim().toUpperCase()).filter(Boolean)
       setAccountForm({
         name: account.name,
-        market: (account.market || 'CN').toUpperCase(),
+        markets: parsedMarkets.length > 0 ? parsedMarkets : ['CN'],
         base_currency: (account.base_currency || 'CNY').toUpperCase(),
         available_funds: account.available_funds.toString(),
       })
@@ -1382,9 +1407,11 @@ export default function StocksPage() {
 
   const handleAccountSubmit = async () => {
     try {
+      const markets = (accountForm.markets || []).map(m => String(m || '').toUpperCase()).filter(Boolean)
       const payload = {
         name: accountForm.name,
-        market: accountForm.market,
+        market: markets[0] || 'CN',
+        markets,
         base_currency: accountForm.base_currency,
         available_funds: parseFloat(accountForm.available_funds) || 0,
       }
@@ -1740,6 +1767,15 @@ export default function StocksPage() {
   }
 
   const marketLabel = (m: string) => m === 'CN' ? 'A股' : m === 'HK' ? '港股' : m === 'US' ? '美股' : m === 'FUND' ? '基金' : m
+  const accountMarketLabels = (account: { market: string; markets?: string[] }) => {
+    const markets = Array.isArray(account.markets) && account.markets.length > 0
+      ? account.markets
+      : String(account.market || 'CN').split(',')
+    return markets
+      .map(m => marketLabel(String(m || '').trim().toUpperCase()))
+      .filter(Boolean)
+      .join(' / ')
+  }
   const agentLabel = (agentName: string) => agents.find(a => a.name === agentName)?.display_name || agentName
 
   // 市场徽章样式和短标签
@@ -1930,10 +1966,10 @@ export default function StocksPage() {
     setPositionColumnOrder(next)
   }, [effectivePositionColumnOrder, setPositionColumnOrder])
 
-  const flashClassByDir = (dir?: 'up' | 'down' | 'neutral') => {
+  const flashClassByDir = (dir?: 'up' | 'down') => {
     if (dir === 'up') return 'animate-highlight-fade-up'
     if (dir === 'down') return 'animate-highlight-fade-down'
-    return 'animate-highlight-fade-neutral'
+    return ''
   }
 
   const getPortfolioKpiFlashClass = (key: string) => {
@@ -1955,11 +1991,12 @@ export default function StocksPage() {
       assets: portfolio.total.total_assets || 0,
     }
     const prev = prevPortfolioKpiRef.current
-    const updates: Record<string, { dir: 'up' | 'down' | 'neutral' }> = {}
+    const updates: Record<string, { dir: 'up' | 'down' }> = {}
     for (const [k, v] of Object.entries(nextValues)) {
       if (!(k in prev)) continue
       const delta = v - prev[k]
-      updates[k] = { dir: delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral' }
+      if (delta === 0) continue
+      updates[k] = { dir: delta > 0 ? 'up' : 'down' }
     }
     if (Object.keys(updates).length > 0) {
       setPortfolioKpiFlashMap(prevMap => {
@@ -1977,7 +2014,7 @@ export default function StocksPage() {
   }, [portfolio, portfolioDayPnl, positionRatio])
 
   useEffect(() => {
-    const changed: Record<string, 'up' | 'down' | 'neutral'> = {}
+    const changed: Record<string, 'up' | 'down'> = {}
     const nextPrev: Record<string, { current_price: number | null; change_pct: number | null }> = { ...prevWatchlistQuoteRef.current }
     for (const stock of stocks) {
       const key = `${stock.market}:${stock.symbol}`
@@ -1992,7 +2029,9 @@ export default function StocksPage() {
         const prevPrice = prev.current_price ?? 0
         const currPrice = current.current_price ?? 0
         const delta = currPrice - prevPrice
-        changed[key] = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral'
+        if (delta !== 0) {
+          changed[key] = delta > 0 ? 'up' : 'down'
+        }
       }
       nextPrev[key] = current
     }
@@ -2520,7 +2559,7 @@ export default function StocksPage() {
                   )}
                   <Building2 className="w-4 h-4 text-primary" />
                   <span className="text-[14px] md:text-[15px] font-semibold text-foreground">{account.name}</span>
-                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">{marketLabel(account.market)}</Badge>
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">{accountMarketLabels(account)}</Badge>
                   <Badge variant="outline" className="text-[10px] px-1.5 py-0">{account.base_currency}</Badge>
                   <span className="text-[11px] md:text-[12px] text-muted-foreground">
                     {account.positions.length} 只
@@ -3703,31 +3742,41 @@ export default function StocksPage() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>账户市场</Label>
-                <Select
-                  value={accountForm.market}
-                  onValueChange={v => {
-                    const market = (v || 'CN').toUpperCase()
-                    const defaultCurrency = market === 'HK' ? 'HKD' : market === 'US' ? 'USD' : 'CNY'
-                    setAccountForm({ ...accountForm, market, base_currency: defaultCurrency })
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="CN">A股</SelectItem>
-                    <SelectItem value="HK">港股</SelectItem>
-                    <SelectItem value="US">美股</SelectItem>
-                    <SelectItem value="FUND">基金</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="mt-1 grid grid-cols-2 gap-2">
+                  {ACCOUNT_MARKET_OPTIONS.map(opt => {
+                    const selected = accountForm.markets.includes(opt.value)
+                    return (
+                      <Button
+                        key={opt.value}
+                        type="button"
+                        variant={selected ? 'default' : 'outline'}
+                        className="justify-start"
+                        onClick={() => {
+                          const exists = accountForm.markets.includes(opt.value)
+                          let nextMarkets = exists
+                            ? accountForm.markets.filter(m => m !== opt.value)
+                            : [...accountForm.markets, opt.value]
+                          if (nextMarkets.length === 0) nextMarkets = ['CN']
+                          const isFundOnly = nextMarkets.length === 1 && nextMarkets[0] === 'FUND'
+                          const nextCurrency = isFundOnly ? 'CNY' : accountForm.base_currency
+                          setAccountForm({ ...accountForm, markets: nextMarkets, base_currency: nextCurrency })
+                        }}
+                      >
+                        {opt.label}
+                      </Button>
+                    )
+                  })}
+                </div>
               </div>
               <div>
                 <Label>账户币种</Label>
+                {(() => {
+                  const isFundOnly = accountForm.markets.length === 1 && accountForm.markets[0] === 'FUND'
+                  return (
                 <Select
-                  value={accountForm.market === 'FUND' ? 'CNY' : accountForm.base_currency}
+                  value={isFundOnly ? 'CNY' : accountForm.base_currency}
                   onValueChange={v => {
-                    const nextCurrency = accountForm.market === 'FUND' ? 'CNY' : (v || 'CNY').toUpperCase()
+                    const nextCurrency = isFundOnly ? 'CNY' : (v || 'CNY').toUpperCase()
                     setAccountForm({ ...accountForm, base_currency: nextCurrency })
                   }}
                 >
@@ -3736,10 +3785,12 @@ export default function StocksPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="CNY">CNY</SelectItem>
-                    {accountForm.market !== 'FUND' && <SelectItem value="HKD">HKD</SelectItem>}
-                    {accountForm.market !== 'FUND' && <SelectItem value="USD">USD</SelectItem>}
+                    {!isFundOnly && <SelectItem value="HKD">HKD</SelectItem>}
+                    {!isFundOnly && <SelectItem value="USD">USD</SelectItem>}
                   </SelectContent>
                 </Select>
+                  )
+                })()}
               </div>
             </div>
             <div>

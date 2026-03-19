@@ -118,10 +118,34 @@ def convert_amount(amount: float, from_currency: str, to_currency: str, rates_to
 
 
 def normalize_account_market(value: str | None) -> str:
-    market = (value or "CN").upper()
-    if market not in SUPPORTED_ACCOUNT_MARKETS:
-        raise HTTPException(400, "market 仅支持 CN/HK/US/FUND")
-    return market
+    markets = normalize_account_markets([value] if value is not None else None)
+    return markets[0]
+
+
+def normalize_account_markets(values: list[str] | None) -> list[str]:
+    raw_values = values or ["CN"]
+    normalized: list[str] = []
+    for item in raw_values:
+        market = str(item or "").strip().upper()
+        if not market:
+            continue
+        if market not in SUPPORTED_ACCOUNT_MARKETS:
+            raise HTTPException(400, "market 仅支持 CN/HK/US/FUND")
+        if market not in normalized:
+            normalized.append(market)
+    if not normalized:
+        raise HTTPException(400, "至少选择一个账户市场")
+    return normalized
+
+
+def parse_account_markets(value: str | None) -> list[str]:
+    raw = str(value or "CN")
+    parts = [x.strip().upper() for x in raw.split(",")]
+    return normalize_account_markets(parts)
+
+
+def serialize_account_markets(values: list[str]) -> str:
+    return ",".join(normalize_account_markets(values))
 
 
 def normalize_currency(value: str | None) -> str:
@@ -135,6 +159,12 @@ def validate_market_currency_pair(market: str, currency: str) -> None:
     expected = MARKET_CURRENCY_MAP.get(market)
     if expected and currency != expected:
         raise HTTPException(400, f"{market} 账户的 base_currency 需为 {expected}")
+
+
+def validate_markets_currency_pair(markets: list[str], currency: str) -> None:
+    normalized_markets = normalize_account_markets(markets)
+    if len(normalized_markets) == 1:
+        validate_market_currency_pair(normalized_markets[0], currency)
 
 
 def _is_integer_quantity(quantity: float) -> bool:
@@ -171,6 +201,7 @@ class AccountCreate(BaseModel):
     name: str
     available_funds: float = 0
     market: str = "CN"
+    markets: list[str] | None = None
     base_currency: str = "CNY"
 
 
@@ -178,6 +209,7 @@ class AccountUpdate(BaseModel):
     name: str | None = None
     available_funds: float | None = None
     market: str | None = None
+    markets: list[str] | None = None
     base_currency: str | None = None
     enabled: bool | None = None
 
@@ -186,6 +218,7 @@ class AccountResponse(BaseModel):
     id: int
     name: str
     market: str
+    markets: list[str] = []
     base_currency: str
     available_funds: float
     enabled: bool
@@ -337,7 +370,8 @@ def apply_position_trade(position: Position, payload: PositionTradeCreate, db: S
 
     if action == "add":
         after_quantity = before_quantity + quantity
-        after_cost_price = (before_cost_value + price * quantity) / after_quantity
+        after_cost_price = (before_cost_value + price *
+                            quantity) / after_quantity
     elif action == "reduce":
         if quantity - before_quantity > 1e-9:
             raise HTTPException(400, "减仓数量不能超过当前持仓")
@@ -347,7 +381,8 @@ def apply_position_trade(position: Position, payload: PositionTradeCreate, db: S
         after_quantity = quantity
         after_cost_price = price
 
-    validate_position_quantity_for_market(after_quantity, market, allow_zero=True)
+    validate_position_quantity_for_market(
+        after_quantity, market, allow_zero=True)
 
     position.quantity = after_quantity
     position.cost_price = after_cost_price
@@ -359,7 +394,8 @@ def apply_position_trade(position: Position, payload: PositionTradeCreate, db: S
         action=action,
         quantity=quantity,
         price=price,
-        amount=float(payload.amount) if payload.amount is not None else price * quantity,
+        amount=float(
+            payload.amount) if payload.amount is not None else price * quantity,
         before_quantity=before_quantity,
         after_quantity=after_quantity,
         before_cost_price=before_cost_price,
@@ -376,10 +412,24 @@ def apply_position_trade(position: Position, payload: PositionTradeCreate, db: S
 
 # ========== Account Endpoints ==========
 
+def _account_to_response(account: Account) -> dict:
+    markets = parse_account_markets(getattr(account, "market", "CN"))
+    return {
+        "id": account.id,
+        "name": account.name,
+        "market": markets[0],
+        "markets": markets,
+        "base_currency": str(account.base_currency or "CNY").upper(),
+        "available_funds": float(account.available_funds or 0),
+        "enabled": bool(account.enabled),
+    }
+
+
 @router.get("/accounts", response_model=list[AccountResponse])
 def list_accounts(db: Session = Depends(get_db)):
     """获取所有账户"""
-    return db.query(Account).order_by(Account.id).all()
+    rows = db.query(Account).order_by(Account.id).all()
+    return [_account_to_response(row) for row in rows]
 
 
 @router.get("/accounts/{account_id}", response_model=AccountResponse)
@@ -388,26 +438,27 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(404, "账户不存在")
-    return account
+    return _account_to_response(account)
 
 
 @router.post("/accounts", response_model=AccountResponse)
 def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     """创建账户"""
-    market = normalize_account_market(data.market)
+    markets = normalize_account_markets(
+        data.markets if data.markets is not None else parse_account_markets(data.market))
     base_currency = normalize_currency(data.base_currency)
-    validate_market_currency_pair(market, base_currency)
+    validate_markets_currency_pair(markets, base_currency)
     account = Account(
         name=data.name,
         available_funds=data.available_funds,
-        market=market,
+        market=serialize_account_markets(markets),
         base_currency=base_currency,
     )
     db.add(account)
     db.commit()
     db.refresh(account)
     logger.info(f"创建账户: {account.name}")
-    return account
+    return _account_to_response(account)
 
 
 @router.put("/accounts/{account_id}", response_model=AccountResponse)
@@ -421,14 +472,16 @@ def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(g
         account.name = data.name
     if data.available_funds is not None:
         account.available_funds = data.available_funds
-    next_market = account.market
+    next_markets = parse_account_markets(account.market)
     next_currency = account.base_currency
-    if data.market is not None:
-        next_market = normalize_account_market(data.market)
+    if data.markets is not None:
+        next_markets = normalize_account_markets(data.markets)
+    elif data.market is not None:
+        next_markets = parse_account_markets(data.market)
     if data.base_currency is not None:
         next_currency = normalize_currency(data.base_currency)
-    validate_market_currency_pair(next_market, next_currency)
-    account.market = next_market
+    validate_markets_currency_pair(next_markets, next_currency)
+    account.market = serialize_account_markets(next_markets)
     account.base_currency = next_currency
     if data.enabled is not None:
         account.enabled = data.enabled
@@ -436,7 +489,7 @@ def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(g
     db.commit()
     db.refresh(account)
     logger.info(f"更新账户: {account.name}")
-    return account
+    return _account_to_response(account)
 
 
 @router.delete("/accounts/{account_id}")
@@ -499,7 +552,8 @@ def create_position(data: PositionCreate, db: Session = Depends(get_db)):
     if not stock:
         raise HTTPException(400, "股票不存在")
 
-    validate_position_quantity_for_market(data.quantity, str(stock.market or "CN"))
+    validate_position_quantity_for_market(
+        data.quantity, str(stock.market or "CN"))
 
     # 检查是否已存在该账户的该股票持仓
     existing = db.query(Position).filter(
@@ -608,9 +662,11 @@ def delete_position(position_id: int, db: Session = Depends(get_db)):
     if not position:
         raise HTTPException(404, "持仓不存在")
 
+    account_name = position.account.name
+    stock_name = position.stock.name
     db.delete(position)
     db.commit()
-    logger.info(f"删除持仓: {position.account.name} - {position.stock.name}")
+    logger.info(f"删除持仓: {account_name} - {stock_name}")
     return {"success": True}
 
 
@@ -632,7 +688,8 @@ def list_position_trades(
         PositionTrade.position_id == position_id
     )
     total = int(query.count())
-    trades = query.order_by(PositionTrade.id.desc()).offset((current_page - 1) * size).limit(size).all()
+    trades = query.order_by(PositionTrade.id.desc()).offset(
+        (current_page - 1) * size).limit(size).all()
     return {
         "items": [_position_trade_to_dict(item) for item in trades],
         "count": len(trades),
@@ -894,10 +951,12 @@ def get_portfolio_summary(
             )
             acc_total_assets = acc_available_funds_display
 
+        account_markets = parse_account_markets(acc.market)
         account_summaries.append({
             "id": acc.id,
             "name": acc.name,
-            "market": account_market,
+            "market": account_markets[0],
+            "markets": account_markets,
             "base_currency": account_base_currency,
             "display_currency": display_currency_norm,
             "available_funds": round(acc_available_funds_display, 2),

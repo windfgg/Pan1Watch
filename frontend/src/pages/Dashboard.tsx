@@ -324,7 +324,7 @@ export default function DashboardPage() {
   const [refreshInterval, setRefreshInterval] = useLocalStorage('panwatch_dashboard_refreshInterval', 30)
   const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null)
   const [lastScanTime, setLastScanTime] = useState<Date | null>(null)
-  const [portfolioKpiFlashMap, setPortfolioKpiFlashMap] = useState<Record<string, { key: number; dir: 'up' | 'down' | 'neutral' }>>({})
+  const [portfolioKpiFlashMap, setPortfolioKpiFlashMap] = useState<Record<string, { key: number; dir: 'up' | 'down' }>>({})
   const prevPortfolioKpiRef = useRef<Record<string, number>>({})
   const refreshTimerRef = useRef<ReturnType<typeof setInterval>>()
   const progressTimerRef = useRef<ReturnType<typeof setInterval>>()
@@ -803,10 +803,10 @@ export default function DashboardPage() {
   const displayDayPnl = useAnimatedNumber(kpiTargets.dayPnl)
   const displayDayPnlPct = useAnimatedNumber(kpiTargets.dayPnlPct)
 
-  const flashClassByDir = (dir: 'up' | 'down' | 'neutral') => {
+  const flashClassByDir = (dir: 'up' | 'down') => {
     if (dir === 'up') return 'animate-highlight-fade-up'
     if (dir === 'down') return 'animate-highlight-fade-down'
-    return 'animate-highlight-fade-neutral'
+    return ''
   }
 
   const getKpiFlashClass = (key: string) => {
@@ -828,11 +828,12 @@ export default function DashboardPage() {
       dayPnl: kpiTargets.dayPnl,
     }
     const prev = prevPortfolioKpiRef.current
-    const updates: Record<string, { dir: 'up' | 'down' | 'neutral' }> = {}
+    const updates: Record<string, { dir: 'up' | 'down' }> = {}
     for (const [k, v] of Object.entries(nextValues)) {
       if (!(k in prev)) continue
       const delta = v - prev[k]
-      const dir: 'up' | 'down' | 'neutral' = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral'
+      if (delta === 0) continue
+      const dir: 'up' | 'down' = delta > 0 ? 'up' : 'down'
       updates[k] = { dir }
     }
     if (Object.keys(updates).length > 0) {
